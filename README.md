@@ -11,7 +11,25 @@ Zunkiree and is reached over HTTP through the seam.
 
 ## Status
 
-S1 — skeleton. Local-first: no deploy, no VPS, no domain yet.
+S2 — the seam. Local-first: no deploy, no VPS, no domain yet.
+
+## The seam
+
+```
+session(agent_id, channel, identity, tenant, turn) -> token stream + tool events + usage
+```
+
+Defined in `src/orca_gateway/seam.py` as the `AgentBackend` protocol. The only
+implementation today is `ZunkireeAgentBackend` (`src/orca_gateway/backends/zunkiree.py`),
+which calls Zunkiree's `POST /api/v1/query/stream`. That adapter is the **only** place
+a backend-specific tenant key or payload shape is allowed to exist — everything above it
+speaks `tenant` / `agent` / `channel` / `identity` / `turn`.
+
+`POST /v1/turn` is the channel-agnostic entry point a future voice/chat adapter calls; it
+runs one turn through the seam and streams the events back as SSE.
+
+Configure the tenant → backend-tenant-key mapping via `ORCA_ZUNKIREE_TENANT_KEYS` (see
+`.env.example`). Never commit a real mapping.
 
 ## Run
 
