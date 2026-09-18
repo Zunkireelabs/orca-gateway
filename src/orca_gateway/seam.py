@@ -14,6 +14,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel
 
+Channel = Literal["chat", "voice"]
+
 
 class Identity(BaseModel):
     """Who is on this turn, and what they're allowed to do.
@@ -41,7 +43,7 @@ class AgentBackend(Protocol):
         self,
         *,
         agent_id: str,
-        channel: str,
+        channel: Channel,
         identity: Identity,
         tenant: str,
         turn: str,

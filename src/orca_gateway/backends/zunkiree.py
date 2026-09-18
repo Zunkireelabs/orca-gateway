@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from orca_gateway.seam import Identity, TurnEvent
+from orca_gateway.seam import Channel, Identity, TurnEvent
 
 logger = logging.getLogger("orca_gateway.backends.zunkiree")
 
@@ -38,7 +38,7 @@ class ZunkireeAgentBackend:
         self,
         *,
         agent_id: str,
-        channel: str,
+        channel: Channel,
         identity: Identity,
         tenant: str,
         turn: str,
@@ -53,7 +53,7 @@ class ZunkireeAgentBackend:
             "site_id": self._tenant_keys[tenant],
             "question": turn,
             "session_id": conversation_id,
-            "channel": "voice" if channel == "voice" else "chat",
+            "channel": channel,
         }
 
         async with self._client.stream(
