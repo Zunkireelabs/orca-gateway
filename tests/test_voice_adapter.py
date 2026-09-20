@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 
-from orca_gateway import main as main_module
+from orca_gateway import deps
 from orca_gateway.channels import elevenlabs_llm
 from orca_gateway.coalescer import TurnCoalescer
 from orca_gateway.config import get_settings
@@ -58,7 +58,7 @@ def wired(monkeypatch):
     monkeypatch.setenv("ORCA_VOICE_SHARED_SECRET", SECRET)
     get_settings.cache_clear()
     backend = _Backend()
-    monkeypatch.setattr(main_module, "get_backend", lambda: backend)
+    monkeypatch.setattr(deps, "get_backend", lambda: backend)
     monkeypatch.setattr(elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.05))
     yield backend
     get_settings.cache_clear()

@@ -119,3 +119,25 @@ async def test_backend_error_propagates_to_every_waiter():
         return_exceptions=True,
     )
     assert all(isinstance(r, ConnectionError) for r in results)
+
+
+async def test_global_cap_limits_backend_runs_across_conversations():
+    c, w = TurnCoalescer(debounce_s=0.0, max_concurrent_runs=1), _Work(delay=0.1)
+    await asyncio.gather(*[c.submit(f"conv{i}", 5, "q", w, _never_gone) for i in range(4)])
+    assert w.max_inflight == 1 and len(w.finished) == 4
+
+
+async def test_cap_of_two_allows_two_at_once_but_no_more():
+    c, w = TurnCoalescer(debounce_s=0.0, max_concurrent_runs=2), _Work(delay=0.1)
+    await asyncio.gather(*[c.submit(f"conv{i}", 5, "q", w, _never_gone) for i in range(5)])
+    assert w.max_inflight == 2
+
+
+async def test_hung_backend_times_out_instead_of_waiting_forever():
+    c = TurnCoalescer(debounce_s=0.0, run_timeout_s=0.1)
+
+    async def hang(_: str):
+        await asyncio.sleep(30)
+
+    with pytest.raises(TimeoutError):
+        await c.submit("t", 3, "a", hang, _never_gone)

@@ -3,16 +3,15 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from functools import lru_cache
 
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from orca_gateway.backends.zunkiree import UnknownTenantError, ZunkireeAgentBackend
+from orca_gateway.backends.zunkiree import UnknownTenantError
 from orca_gateway.channels import elevenlabs_llm
-from orca_gateway.config import get_settings
-from orca_gateway.seam import AgentBackend, Channel, Identity
+from orca_gateway.deps import get_backend
+from orca_gateway.seam import Channel, Identity
 
 logger = logging.getLogger("orca_gateway.main")
 
@@ -23,15 +22,6 @@ app.include_router(elevenlabs_llm.router)
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
-
-
-@lru_cache
-def get_backend() -> AgentBackend:
-    settings = get_settings()
-    return ZunkireeAgentBackend(
-        base_url=settings.zunkiree_base_url,
-        tenant_keys=settings.tenant_key_map(),
-    )
 
 
 class TurnRequest(BaseModel):

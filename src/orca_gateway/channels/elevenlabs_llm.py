@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
+from orca_gateway import deps
 from orca_gateway.coalescer import ClientGoneError, StaleTurnError, TurnCoalescer
 from orca_gateway.config import get_settings
 from orca_gateway.seam import Identity
@@ -37,7 +38,12 @@ _coalescer: TurnCoalescer | None = None
 def get_coalescer() -> TurnCoalescer:
     global _coalescer
     if _coalescer is None:
-        _coalescer = TurnCoalescer(debounce_s=get_settings().voice_debounce_ms / 1000)
+        settings = get_settings()
+        _coalescer = TurnCoalescer(
+            debounce_s=settings.voice_debounce_ms / 1000,
+            max_concurrent_runs=settings.voice_max_concurrent_runs,
+            run_timeout_s=settings.voice_run_timeout_s,
+        )
     return _coalescer
 
 
@@ -109,9 +115,7 @@ async def chat_completions(request: Request):
     if not settings.voice_tenant:
         raise HTTPException(503, "voice adapter not configured")
 
-    from orca_gateway import main as main_module  # late: main includes this router
-
-    backend = main_module.get_backend()
+    backend = deps.get_backend()
 
     async def work(text: str) -> TurnResult:
         answer_tokens: list[str] = []

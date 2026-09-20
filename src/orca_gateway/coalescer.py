@@ -44,8 +44,17 @@ class _Conversation:
 
 
 class TurnCoalescer:
-    def __init__(self, *, debounce_s: float = 0.3, idle_ttl_s: float = 600.0) -> None:
+    def __init__(
+        self,
+        *,
+        debounce_s: float = 0.3,
+        idle_ttl_s: float = 600.0,
+        max_concurrent_runs: int = 1,
+        run_timeout_s: float = 25.0,
+    ) -> None:
         self._debounce_s = debounce_s
+        self._slots = asyncio.Semaphore(max_concurrent_runs)  # across ALL conversations
+        self._run_timeout_s = run_timeout_s
         self._idle_ttl_s = idle_ttl_s
         self._convs: dict[str, _Conversation] = {}
 
@@ -102,7 +111,9 @@ class TurnCoalescer:
                 await prev
         await asyncio.sleep(self._debounce_s)
         try:
-            outcome = await work(entry.text)
+            async with asyncio.timeout(self._run_timeout_s):
+                async with self._slots:
+                    outcome = await work(entry.text)
         except asyncio.CancelledError:
             raise  # restarted, superseded or abandoned; the canceller settles the future
         except Exception as exc:
