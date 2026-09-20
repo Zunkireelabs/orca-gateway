@@ -16,6 +16,10 @@ Exactly two routes, enforced **in the Traefik router rule** (`docker-compose.yml
 | `POST /chat/completions` | The voice platform's custom-LLM client calls it. Guarded by a shared secret: `Authorization: Bearer <ORCA_VOICE_SHARED_SECRET>` (constant-time compare; the platform sends an Authorization header even with no key set, so only the *value* counts). Fails closed (503) if the secret is unset. |
 | `GET /health` | Liveness + which commit is running: `{"status":"ok","sha":"<full commit sha>"}`. Unauthenticated, cheap, and **never touches a backend**: a probing health check would compete for the 1-run cap. |
 
+Production Traefik is **v2.11**: a request that matches an allowed *path* but not its *method* gets an
+empty-body **405**, not 404 (v3 says 404); `HEAD /health` is 405 too, since the router is `Method(GET)`.
+Both mean "rejected at the proxy". Verify proxy behaviour against the production version, not a newer one.
+
 Everything else (other methods, `/docs`, `/openapi.json`, unknown paths, wrong `Host`) gets Traefik's own
 404 before reaching the container. The app also disables `/docs`, `/redoc` and `/openapi.json`.
 The route allowlist is what keeps a future accidental route (like the unauthenticated `/v1/turn`, removed
