@@ -41,6 +41,12 @@ router = APIRouter()
 
 _SLUG = re.compile(SLUG_PATTERN)
 _TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$")
+# max_session_seconds exceeded (S5 brief §3.4): a call-center-generic message, not tenant-authored
+# like out_of_hours_message, since there is nothing product-specific about a session time limit.
+_SESSION_LIMIT_MESSAGE = (
+    "Thank you for calling {brand}. We've reached the time limit for this call; "
+    "please call back to continue."
+)
 _coalescer: TurnCoalescer | None = None
 
 
@@ -58,6 +64,12 @@ def get_coalescer() -> TurnCoalescer:
 
 class UpstreamError(Exception):
     pass
+
+
+class DailySpendCapExceeded(Exception):
+    """Raised inside work() so the coalescer can share ONE refusal decision across every
+    duplicate raw request racing the same turn, rather than each computing (and DB-reading) it
+    independently ahead of the coalescer's own race."""
 
 
 @dataclass
@@ -131,12 +143,29 @@ async def chat_completions(request: Request):
 
     slug = _tenant_slug(request)
     log = logging.getLogger("orca_gateway.channels.elevenlabs_llm")
+    # Metering is a add-on to serving, never a precondition for it: if it cannot even be
+    # constructed (e.g. no database configured), every check below degrades to "skip metering"
+    # rather than turning into an unrelated 500 on every call.
+    try:
+        metering = deps.get_calls_repo()
+    except Exception:
+        metering = None
+        log.warning("calls repo unavailable; metering disabled for this request")
     try:
         cfg = await deps.get_tenant_store().get(slug)
         ch = require_serving(cfg, "voice")
     except TenantUnavailableError as exc:
         # Fail CLOSED and uniformly (no slug enumeration): unknown, inactive, disabled, killed.
         log.warning("tenant refused slug=%s reason=%s", slug, exc.reason)
+        if exc.reason == "kill switch on" and metering is not None:
+            # A deterministic, definitive signal that this call is over -- close it now rather
+            # than waiting for the idle-timeout sweep (see 0002_calls.sql).
+            try:
+                await metering.close_call(conversation_id, "kill_switch")
+            except Exception:
+                log.exception(
+                    "failed to close call on kill switch conversation=%s", conversation_id
+                )
         raise HTTPException(403, "tenant unavailable") from None
     except TenantStoreError:
         log.exception("tenant config unreachable slug=%s", slug)
@@ -144,7 +173,69 @@ async def chat_completions(request: Request):
 
     backend = deps.get_backend()
 
+    async def record_turn() -> None:
+        if metering is None:
+            return
+        try:
+            await metering.record_turn(
+                tenant_slug=slug,
+                channel="voice",
+                conversation_id=conversation_id,
+                agent_id=ch.agent_id,
+                elevenlabs_agent_id=ch.elevenlabs_agent_id,
+            )
+        except Exception:
+            log.exception(
+                "metering record_turn failed slug=%s conversation=%s", slug, conversation_id
+            )
+
     async def work(text: str) -> TurnResult:
+        # Deliberately the ONLY place daily_spend_cap / max_session_seconds are read and
+        # record_turn is written: the coalescer guarantees `work()` runs exactly once per real
+        # turn, no matter how many duplicate raw HTTP requests the platform fans a spoken turn
+        # into (S1). Doing these DB round trips in the handler BEFORE calling
+        # `get_coalescer().submit()` would run once per duplicate (inflating turn_count) AND add
+        # variable per-duplicate latency ahead of the very race the coalescer exists to resolve
+        # deterministically -- regression-tested by test_fan_out_of_four_variants_makes_exactly
+        # _one_backend_call, which is timing-sensitive to exactly this.
+        #
+        # daily_spend_cap only gates a call's FIRST turn (no row yet) -- an already-running call
+        # is never cut off mid-conversation by a cap it started under (S5 brief §3.4). Metering
+        # being unreachable fails OPEN: a metering outage must not become a full serving outage
+        # on top of it, the same call the tenant store's own stale-cache grace period makes
+        # elsewhere.
+        existing_call = None
+        if metering is not None:
+            try:
+                existing_call = await metering.get_open_call(conversation_id)
+            except Exception:
+                log.exception("metering unreachable checking call state slug=%s", slug)
+            if existing_call is None and ch.daily_spend_cap is not None:
+                try:
+                    spend = await metering.daily_spend_usd(slug)
+                except Exception:
+                    spend = None
+                    log.exception("metering unreachable reading daily spend slug=%s", slug)
+                if spend is not None and spend >= ch.daily_spend_cap:
+                    log.warning(
+                        "tenant refused slug=%s reason=daily_spend_cap spend=%.6f cap=%.2f",
+                        slug,
+                        spend,
+                        ch.daily_spend_cap,
+                    )
+                    raise DailySpendCapExceeded()
+
+        if existing_call is not None and ch.max_session_seconds is not None:
+            elapsed = (deps.now() - existing_call.started_at).total_seconds()
+            if elapsed > ch.max_session_seconds:
+                # A clean handoff-style response, never a hard error mid-sentence (S5 brief
+                # §3.4). The call itself stays open -- closed later by the idle-timeout sweep
+                # once the caller actually stops talking, not unilaterally by this one turn.
+                await record_turn()
+                text = _SESSION_LIMIT_MESSAGE.replace("{brand}", ch.spoken_brand_name)
+                return TurnResult(answer=text, usage=None)
+
+        await record_turn()
         answer_tokens: list[str] = []
         answer: str | None = None
         usage: dict | None = None
@@ -172,7 +263,10 @@ async def chat_completions(request: Request):
     available = availability(cfg, ch, deps.now())
     if not available.open and ch.out_of_hours_behaviour == "say_closed":
         # Channel-level decision: the tenant chose to say it is closed rather than let the agent
-        # pick up. The backend is never called, so nothing can be offered or promised.
+        # pick up. The backend is never called, so nothing can be offered or promised. Not
+        # coalesced (pre-dates S5): a duplicate raw request here records more than one turn, an
+        # acceptable, low-stakes inaccuracy since no backend cost is ever attached to this path.
+        await record_turn()
         text = (ch.out_of_hours_message or "").replace("{brand}", ch.spoken_brand_name)
         result = TurnResult(answer=text, usage=None)
     else:
@@ -180,6 +274,8 @@ async def chat_completions(request: Request):
             result = await get_coalescer().submit(
                 conversation_id, depth, turn, work, request.is_disconnected
             )
+        except DailySpendCapExceeded:
+            raise HTTPException(403, "tenant unavailable") from None
         except ClientGoneError:
             return Response(status_code=499)
         except StaleTurnError:
@@ -189,6 +285,17 @@ async def chat_completions(request: Request):
         except Exception:
             log.exception("voice turn failed conversation=%s depth=%s", conversation_id, depth)
             raise HTTPException(502, "upstream agent unavailable") from None
+
+    if result.usage and metering is not None:
+        try:
+            await metering.record_usage(
+                conversation_id=conversation_id,
+                model=result.usage.get("model", ""),
+                prompt_tokens=result.usage.get("prompt_tokens", 0),
+                completion_tokens=result.usage.get("completion_tokens", 0),
+            )
+        except Exception:
+            log.exception("metering record_usage failed conversation=%s", conversation_id)
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     model = body.get("model", "orca")

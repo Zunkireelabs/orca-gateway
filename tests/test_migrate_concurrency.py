@@ -24,4 +24,4 @@ def test_concurrent_migrate_runs_never_double_apply(pg_url, tmp_path):
     assert sorted(results, key=len) == [[], [], ["0002_slow.sql"]]
     with psycopg.connect(pg_url) as conn:
         versions = {r[0] for r in conn.execute("select version from orca_gw.schema_migrations")}
-    assert versions == {"0001_tenants.sql", "0002_slow.sql"}
+    assert versions == {"0001_tenants.sql", "0002_calls.sql", "0002_slow.sql"}

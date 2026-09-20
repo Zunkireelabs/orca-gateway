@@ -1,0 +1,221 @@
+"""Against a REAL Postgres: the calls_repo hot path (idempotency, usage accumulation, closing,
+daily-spend rollup, the idle-timeout sweep)."""
+
+import psycopg
+import pytest
+
+from orca_gateway.calls_repo import PgCallsRepository
+from orca_gateway.cost import cost_usd
+from orca_gateway.tenant_repo import PgTenantRepository
+from tests.tenant_fixtures import dental_city
+
+
+@pytest.fixture
+async def tenant(pg_url):
+    """dental-city exists in orca_gw.tenants, satisfying calls.tenant_id's FK."""
+    await PgTenantRepository(pg_url).upsert(dental_city())
+    return "dental-city"
+
+
+@pytest.fixture
+def repo(pg_url) -> PgCallsRepository:
+    return PgCallsRepository(pg_url)
+
+
+async def test_get_open_call_returns_none_for_unknown_conversation(repo):
+    assert await repo.get_open_call("nope") is None
+
+
+async def test_record_turn_is_idempotent_on_conversation_id(repo, tenant, pg_url):
+    for expected_turn_count in (1, 2, 3):
+        state = await repo.record_turn(
+            tenant_slug=tenant,
+            channel="voice",
+            conversation_id="conv-1",
+            agent_id="front-desk",
+            elevenlabs_agent_id=None,
+        )
+        assert state.turn_count == expected_turn_count
+
+    with psycopg.connect(pg_url) as conn:
+        rows = conn.execute(
+            "select count(*) from orca_gw.calls where conversation_id = %s", ("conv-1",)
+        ).fetchone()
+    assert rows[0] == 1  # exactly one row, never one per turn
+
+
+async def test_record_turn_keeps_first_elevenlabs_agent_id_seen(repo, tenant):
+    await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-2",
+        agent_id="front-desk",
+        elevenlabs_agent_id="el-agent-1",
+    )
+    await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-2",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    call = await repo.get_open_call("conv-2")
+    assert call is not None
+
+
+async def test_record_usage_accumulates_across_turns_and_computes_cost(repo, tenant, pg_url):
+    await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-3",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    await repo.record_usage(
+        conversation_id="conv-3", model="gpt-4o-mini", prompt_tokens=100, completion_tokens=20
+    )
+    await repo.record_usage(
+        conversation_id="conv-3", model="gpt-4o-mini", prompt_tokens=50, completion_tokens=10
+    )
+
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select llm_prompt_tokens, llm_completion_tokens, llm_cost_usd, llm_model "
+            "from orca_gw.calls where conversation_id = %s",
+            ("conv-3",),
+        ).fetchone()
+    prompt, completion, cost, model = row
+    assert (prompt, completion, model) == (150, 30, "gpt-4o-mini")
+    assert float(cost) == cost_usd("gpt-4o-mini", 150, 30)
+
+
+async def test_record_usage_for_unknown_conversation_is_dropped_not_fabricated(repo):
+    # No exception, no row created out of thin air -- just a documented no-op (logged).
+    await repo.record_usage(
+        conversation_id="ghost", model="gpt-4o-mini", prompt_tokens=10, completion_tokens=1
+    )
+
+
+async def test_close_call_rolls_cost_into_tenant_daily_spend(repo, tenant, pg_url):
+    await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-4",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    await repo.record_usage(
+        conversation_id="conv-4", model="gpt-4o-mini", prompt_tokens=1000, completion_tokens=200
+    )
+    await repo.close_call("conv-4", "completed")
+
+    spend = await repo.daily_spend_usd(tenant)
+    assert spend == cost_usd("gpt-4o-mini", 1000, 200)
+
+    with psycopg.connect(pg_url) as conn:
+        ended = conn.execute(
+            "select ended_at is not null, ended_reason from orca_gw.calls "
+            "where conversation_id = %s",
+            ("conv-4",),
+        ).fetchone()
+    assert ended == (True, "completed")
+
+
+async def test_close_call_is_idempotent_does_not_double_count_spend(repo, tenant):
+    await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-5",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    await repo.record_usage(
+        conversation_id="conv-5", model="gpt-4o-mini", prompt_tokens=1000, completion_tokens=200
+    )
+    await repo.close_call("conv-5", "completed")
+    await repo.close_call("conv-5", "completed")  # already ended: must be a no-op
+
+    assert await repo.daily_spend_usd(tenant) == cost_usd("gpt-4o-mini", 1000, 200)
+
+
+async def test_record_turn_does_not_reopen_an_already_closed_call(repo, tenant):
+    state = await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-6",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    await repo.close_call("conv-6", "kill_switch")
+
+    # A straggler turn arrives after the call is already closed: not reopened, turn_count untouched.
+    straggler = await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-6",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    assert straggler.ended_at is not None
+    assert straggler.turn_count == state.turn_count
+
+
+async def test_sweep_idle_closes_stale_open_calls_as_timed_out(repo, tenant, pg_url):
+    await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-7",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute(
+            "update orca_gw.calls set last_turn_at = now() - interval '10 minutes' "
+            "where conversation_id = %s",
+            ("conv-7",),
+        )
+
+    closed = await repo.sweep_idle(idle_s=300)
+    assert closed == ["conv-7"]
+
+    call = await repo.get_open_call("conv-7")
+    assert call.ended_at is not None
+
+
+async def test_sweep_idle_leaves_recently_active_calls_open(repo, tenant):
+    await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-8",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    closed = await repo.sweep_idle(idle_s=300)
+    assert closed == []
+    assert (await repo.get_open_call("conv-8")).ended_at is None
+
+
+async def test_daily_spend_usd_is_zero_for_a_tenant_with_no_spend_today(repo, tenant):
+    assert await repo.daily_spend_usd(tenant) == 0.0
+
+
+async def test_close_call_with_no_usage_counts_as_unpriced_not_a_fabricated_zero(
+    repo, tenant, pg_url
+):
+    await repo.record_turn(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-9",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    await repo.close_call("conv-9", "timed_out")  # no record_usage ever called
+
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select s.llm_cost_usd, s.call_count, s.unpriced_call_count "
+            "from orca_gw.tenant_daily_spend s join orca_gw.tenants t on t.id = s.tenant_id "
+            "where t.slug = %s",
+            (tenant,),
+        ).fetchone()
+    assert row == (0, 1, 1)
