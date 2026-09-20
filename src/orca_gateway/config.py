@@ -18,6 +18,18 @@ class Settings(BaseSettings):
     # e.g. '{"my-tenant": "some-backend-tenant-key"}'
     zunkiree_tenant_keys: str = "{}"
 
+    # Voice channel adapter. All required at runtime; the route fails closed if unset.
+    voice_tenant: str = ""
+    voice_agent_id: str = "default"
+    voice_shared_secret: str = ""
+    voice_debounce_ms: int = 300
+    # Max backend runs in flight ACROSS conversations. The stage backend has a 2-socket pool
+    # that shares a connection ceiling with production, so stay at or below it.
+    voice_max_concurrent_runs: int = 1
+    # Bound on one backend call (including waiting for a slot). A hung backend must not
+    # hold a call open forever.
+    voice_run_timeout_s: float = 25.0
+
     def tenant_key_map(self) -> dict[str, str]:
         return json.loads(self.zunkiree_tenant_keys)
 
