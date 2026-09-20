@@ -31,7 +31,7 @@ in #4) from being reachable. **Any new route must be added to the router rule de
    with `git checkout -B main origin/main` **and `git reset --hard`** (the non-force checkout alone keeps
    uncommitted drift across deploys), render `.env` from Actions secrets, pull the image, recreate the
    container, then confirm the **running container** reports the deployed sha.
-4. **verify** (from a GitHub runner, i.e. outside the VPS): `/health` reports the sha; the rest of the
+4. **verify** (retries ~5 min: the first deploy may still be obtaining the Let's Encrypt certificate; if it times out, read Traefik's ACME logs before suspecting the route allowlist) (from a GitHub runner, i.e. outside the VPS): `/health` reports the sha; the rest of the
    surface 404s; a wrong bearer gets 401; HSTS present. **No conversational request is ever sent.**
 
 `.env` is regenerated every deploy. **Never hand-edit it on the VPS.** `.dockerignore` excludes `.env*`,
@@ -41,7 +41,9 @@ and the Dockerfile copies only named paths, so it can't end up in the image.
 
 `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `ORCA_VOICE_SHARED_SECRET`, `ORCA_ZUNKIREE_TENANT_KEYS`.
 Verify by **name only**: `gh secret list`. Never print a value.
-The `staging` GitHub environment is used by the deploy job.
+These are plain **repo-level** secrets (this org is on GitHub Free, so no deployment environments).
+Generate the voice secret as **hex** (`openssl rand -hex 32`): it is rendered into `.env`, which
+docker compose also reads for interpolation, so a `$` in a secret would be mangled.
 
 ### Runtime config (rendered into `.env`)
 
