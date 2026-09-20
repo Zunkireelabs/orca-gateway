@@ -26,8 +26,17 @@ _LOCK_KEY = 7_204_112_001  # arbitrary, stable; serialises concurrent runners
 
 
 def migrate(database_url: str, directory: Path) -> list[str]:
+    """Runs under a session-level advisory lock, so concurrent deploys serialise rather than
+    race. MUST be autocommit: a non-autocommit connection leaves pg_advisory_lock's implicit
+    transaction open while it blocks, and the read of `schema_migrations` taken once the lock is
+    granted can still see the pre-block snapshot rather than the lock holder's just-committed
+    rows -- a waiter then tries to re-run an already-applied migration and crashes on the
+    duplicate CREATE TABLE. Reproduced and fixed 2026-09-20 (see test_migrate_concurrency.py);
+    autocommit=True (a fresh statement, hence a fresh snapshot, on every call) closes it."""
     applied_now: list[str] = []
-    with psycopg.connect(database_url, prepare_threshold=None, connect_timeout=10) as conn:
+    with psycopg.connect(
+        database_url, prepare_threshold=None, connect_timeout=10, autocommit=True
+    ) as conn:
         conn.execute("select pg_advisory_lock(%s)", (_LOCK_KEY,))
         try:
             conn.execute("create schema if not exists orca_gw")
@@ -36,7 +45,6 @@ def migrate(database_url: str, directory: Path) -> list[str]:
                 "version text primary key, checksum text not null, "
                 "applied_at timestamptz not null default now())"
             )
-            conn.commit()
             done = dict(conn.execute("select version, checksum from orca_gw.schema_migrations"))
             for path in sorted(directory.glob("*.sql")):
                 sql = path.read_text()
@@ -54,7 +62,6 @@ def migrate(database_url: str, directory: Path) -> list[str]:
                 applied_now.append(path.name)
         finally:
             conn.execute("select pg_advisory_unlock(%s)", (_LOCK_KEY,))
-            conn.commit()
     return applied_now
 
 
