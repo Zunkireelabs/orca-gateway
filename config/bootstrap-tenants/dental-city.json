@@ -1,0 +1,23 @@
+{
+  "slug": "dental-city",
+  "display_name": "The Dental City",
+  "is_active": true,
+  "timezone": "Asia/Kathmandu",
+  "backend": "zunkiree",
+  "backend_config": {
+    "site_id": "dental-city",
+    "base_url": "https://staging-api.zunkireelabs.com"
+  },
+  "channels": {
+    "voice": {
+      "channel": "voice",
+      "is_enabled": true,
+      "agent_id": "front-desk",
+      "languages": ["ne", "en"],
+      "default_language": "ne",
+      "voice_id": null,
+      "spoken_brand_name": "Dental City",
+      "out_of_hours_behaviour": "handoff_anyway"
+    }
+  }
+}
