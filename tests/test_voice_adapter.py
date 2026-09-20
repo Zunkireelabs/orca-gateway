@@ -11,6 +11,8 @@ from orca_gateway.coalescer import TurnCoalescer
 from orca_gateway.config import get_settings
 from orca_gateway.main import app
 from orca_gateway.seam import Channel, Identity, TurnEvent
+from orca_gateway.tenants import TenantStore
+from tests.tenant_fixtures import InMemoryRepo, dental_city
 
 TRACE = "ae020331887c7f6b95acd0c22afb86fa"
 TP = f"00-{TRACE}-8a2e73c1d4f50b96-01"
@@ -53,12 +55,11 @@ class _Backend:
 
 @pytest.fixture
 def wired(monkeypatch):
-    monkeypatch.setenv("ORCA_VOICE_TENANT", "my-tenant")
-    monkeypatch.setenv("ORCA_VOICE_AGENT_ID", "front-desk")
     monkeypatch.setenv("ORCA_VOICE_SHARED_SECRET", SECRET)
     get_settings.cache_clear()
     backend = _Backend()
     monkeypatch.setattr(deps, "get_backend", lambda: backend)
+    monkeypatch.setattr(deps, "get_tenant_store", lambda: TenantStore(InMemoryRepo(dental_city())))
     monkeypatch.setattr(elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.05))
     yield backend
     get_settings.cache_clear()
@@ -78,8 +79,10 @@ def _body(user="hello", **kw):
     }
 
 
-def _headers(tp=TP, auth=f"Bearer {SECRET}"):
+def _headers(tp=TP, auth=f"Bearer {SECRET}", tenant="dental-city"):
     h = {}
+    if tenant:
+        h["x-orca-tenant"] = tenant
     if tp:
         h["traceparent"] = tp
     if auth:
@@ -114,7 +117,7 @@ async def test_seam_call_uses_trace_id_last_user_turn_and_ignores_their_prompt(w
     (call,) = wired.calls
     assert call["conversation_id"] == TRACE and call["turn"] == "hello"
     assert (call["channel"], call["identity"]) == ("voice", "anonymous")
-    assert (call["tenant"], call["agent_id"]) == ("my-tenant", "front-desk")
+    assert (call["tenant"], call["agent_id"]) == ("dental-city", "front-desk")
 
 
 @pytest.mark.parametrize("tp", [None, "", "garbage", f"00-{'0' * 32}-8a2e73c1d4f50b96-01"])
@@ -180,3 +183,14 @@ async def test_upstream_failure_then_retry_at_same_depth_succeeds(wired):
     wired.events = None
     r = await _post()  # the platform's retry, same depth and same trace-id
     assert r.status_code == 200 and "final:hello" in r.text
+
+
+async def test_no_database_configured_fails_closed_with_503_not_a_traceback(wired, monkeypatch):
+    monkeypatch.undo()  # drop the fixture's fakes: use the real dependency with no DB URL set
+    monkeypatch.setenv("ORCA_VOICE_SHARED_SECRET", SECRET)
+    monkeypatch.setenv("ORCA_DATABASE_URL", "")
+    get_settings.cache_clear()
+    deps.get_tenant_store.cache_clear()
+    r = await _post()
+    assert r.status_code == 503 and "Traceback" not in r.text
+    deps.get_tenant_store.cache_clear()

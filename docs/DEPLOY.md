@@ -31,11 +31,14 @@ in #4) from being reachable. **Any new route must be added to the router rule de
 
 1. **checks**: ruff + pytest.
 2. **release**: build once, push `ghcr.io/zunkireelabs/orca-gateway:<full-sha>` (and `:main`; never `:latest`), with `GIT_SHA` baked in.
-3. **deploy** (SSH): fresh HTTPS checkout of the repo into `/home/zunkireelabs/devprojects/orca-gateway-stage`
+3. **migrate**: applies `migrations/*.sql` to schema `orca_gw` (idempotent, checksummed) and bootstraps
+   tenants from `config/bootstrap-tenants/*.json`, which only INSERTS slugs that are absent and so never
+   overwrites an edit made afterwards. If this fails, deploy is skipped and the previous build keeps serving.
+4. **deploy** (SSH): fresh HTTPS checkout of the repo into `/home/zunkireelabs/devprojects/orca-gateway-stage`
    with `git checkout -B main origin/main` **and `git reset --hard`** (the non-force checkout alone keeps
    uncommitted drift across deploys), render `.env` from Actions secrets, pull the image, recreate the
    container, then confirm the **running container** reports the deployed sha.
-4. **verify** (retries ~5 min: the first deploy may still be obtaining the Let's Encrypt certificate; if it times out, read Traefik's ACME logs before suspecting the route allowlist) (from a GitHub runner, i.e. outside the VPS): `/health` reports the sha; the rest of the
+5. **verify** (retries ~5 min: the first deploy may still be obtaining the Let's Encrypt certificate; if it times out, read Traefik's ACME logs before suspecting the route allowlist) (from a GitHub runner, i.e. outside the VPS): `/health` reports the sha; the rest of the
    surface 404s; a wrong bearer gets 401; HSTS present. **No conversational request is ever sent.**
 
 `.env` is regenerated every deploy. **Never hand-edit it on the VPS.** `.dockerignore` excludes `.env*`,
@@ -43,7 +46,7 @@ and the Dockerfile copies only named paths, so it can't end up in the image.
 
 ### Required repo secrets (set by a human, from 1Password: `gh secret set NAME`)
 
-`VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `ORCA_VOICE_SHARED_SECRET`, `ORCA_ZUNKIREE_TENANT_KEYS`.
+`VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `ORCA_VOICE_SHARED_SECRET`, `ORCA_DATABASE_URL`.
 Verify by **name only**: `gh secret list`. Never print a value.
 These are plain **repo-level** secrets (this org is on GitHub Free, so no deployment environments).
 Generate the voice secret as **hex** (`openssl rand -hex 32`): it is rendered into `.env`, which
@@ -53,8 +56,7 @@ docker compose also reads for interpolation, so a `$` in a secret would be mangl
 
 | Var | Value | Note |
 |---|---|---|
-| `ORCA_ZUNKIREE_BASE_URL` | `https://staging-api.zunkireelabs.com` | stage |
-| `ORCA_VOICE_TENANT` | `dental-city` | interim; tenant config (S4) replaces it |
+| `ORCA_DATABASE_URL` | secret | Postgres holding tenant config (schema `orca_gw`). Use the Supabase **session-mode pooler** URL with `sslmode=require` (GitHub runners are IPv4-only and the direct host is IPv6-only; transaction-mode pooling breaks the migration advisory lock). Percent-encode the password. |
 | `ORCA_VOICE_MAX_CONCURRENT_RUNS` | `1` | **Do not raise.** Zunkiree stage has a 2-socket pool sharing a ceiling with PROD. Never load-test. |
 | `ORCA_VOICE_RUN_TIMEOUT_S` | `25.0` | |
 
@@ -90,3 +92,10 @@ Agent → LLM → **Custom LLM**:
 curl -s https://orca-gw-stage.zunkireelabs.com/health                # 200 + sha
 curl -s -o /dev/null -w '%{http_code}\n' https://orca-gw-stage.zunkireelabs.com/docs   # 404
 ```
+
+## Tenants and the dashboard header
+
+Which tenant a call is for comes from the **`X-Orca-Tenant`** request header, set per agent in the voice
+platform's **Request headers** (e.g. `X-Orca-Tenant: dental-city`). A missing or malformed header is a 400;
+an unknown, inactive, disabled or killed tenant is a uniform 403. **There is no default tenant.**
+Add the header in the dashboard *before* merging the release that requires it (old code ignores it).

@@ -30,8 +30,9 @@ Channel adapters call the seam **in-process** (`deps.get_backend().session(...)`
 deliberately no HTTP entry point to the seam. A public route that reaches a tenant's backend
 must carry its own auth, as `POST /chat/completions` does (`ORCA_VOICE_SHARED_SECRET`).
 
-Configure the tenant → backend-tenant-key mapping via `ORCA_ZUNKIREE_TENANT_KEYS` (see
-`.env.example`). Never commit a real mapping.
+Tenants are **data**, not configuration: rows in Postgres (schema `orca_gw`), so two tenants differ
+by rows and never by code. See `docs/TENANT-CONFIG.md`. A voice request names its tenant with the
+`X-Orca-Tenant` header; there is no default tenant.
 
 ## Run
 

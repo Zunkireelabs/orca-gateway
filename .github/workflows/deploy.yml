@@ -27,6 +27,18 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: orca
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      ORCA_TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/orca
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -34,7 +46,7 @@ jobs:
           python-version: "3.11"
       - run: uv sync
       - run: uv run ruff check .
-      - run: uv run pytest
+      - run: uv run pytest -rs
 
   release:
     runs-on: ubuntu-latest
@@ -63,9 +75,28 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-  deploy:
+  # Schema first, then code: the new container needs the tables. Idempotent; a failure here
+  # blocks the deploy and the previous build keeps serving. Bootstrap only INSERTS tenants whose
+  # slug is absent, so it never overwrites an edit made after the first deploy.
+  migrate:
     runs-on: ubuntu-latest
     needs: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+      - run: uv sync --frozen
+      - name: Migrate orca_gw and bootstrap tenants
+        env:
+          ORCA_DATABASE_URL: ${{ secrets.ORCA_DATABASE_URL }}
+        run: |
+          if [ -z "$ORCA_DATABASE_URL" ]; then echo "::error::secret ORCA_DATABASE_URL is empty"; exit 1; fi
+          uv run python -m orca_gateway.migrate --bootstrap config/bootstrap-tenants
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [release, migrate]
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.5
@@ -74,16 +105,16 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           IMAGE_TAG: ${{ github.sha }}
           ORCA_VOICE_SHARED_SECRET: ${{ secrets.ORCA_VOICE_SHARED_SECRET }}
-          ORCA_ZUNKIREE_TENANT_KEYS: ${{ secrets.ORCA_ZUNKIREE_TENANT_KEYS }}
+          ORCA_DATABASE_URL: ${{ secrets.ORCA_DATABASE_URL }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,ORCA_VOICE_SHARED_SECRET,ORCA_ZUNKIREE_TENANT_KEYS
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,ORCA_VOICE_SHARED_SECRET,ORCA_DATABASE_URL
           script: |
             set -e   # never `set -x`: this script handles secrets
 
-            for v in GHCR_TOKEN IMAGE_TAG ORCA_VOICE_SHARED_SECRET ORCA_ZUNKIREE_TENANT_KEYS; do
+            for v in GHCR_TOKEN IMAGE_TAG ORCA_VOICE_SHARED_SECRET ORCA_DATABASE_URL; do
               # [ -n ] only: never ${VAR:-default}, which would print the value.
               if [ -z "$(printenv $v)" ]; then echo "::error::required secret/var $v is empty"; exit 1; fi
             done
@@ -113,11 +144,10 @@ jobs:
             echo "=== Rendering .env from secrets (regenerated every deploy; never hand-edit) ==="
             umask 077
             {
-              echo "ORCA_ZUNKIREE_BASE_URL=https://staging-api.zunkireelabs.com"
-              echo "ORCA_VOICE_TENANT=dental-city"
-              echo "ORCA_VOICE_AGENT_ID=front-desk"
+              # Tenants (which brain, which voice, hours, kill switch) are DATA in orca_gw now;
+              # there is deliberately no per-tenant setting in this file.
               printf 'ORCA_VOICE_SHARED_SECRET=%s\n' "$ORCA_VOICE_SHARED_SECRET"
-              printf 'ORCA_ZUNKIREE_TENANT_KEYS=%s\n' "$ORCA_ZUNKIREE_TENANT_KEYS"
+              printf 'ORCA_DATABASE_URL=%s\n' "$ORCA_DATABASE_URL"
               # Zunkiree stage has a 2-socket pool sharing a ceiling with PROD. Do not raise.
               echo "ORCA_VOICE_MAX_CONCURRENT_RUNS=1"
               echo "ORCA_VOICE_RUN_TIMEOUT_S=25.0"

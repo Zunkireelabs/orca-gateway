@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import re
 import time
 import uuid
@@ -28,9 +29,17 @@ from orca_gateway import deps
 from orca_gateway.coalescer import ClientGoneError, StaleTurnError, TurnCoalescer
 from orca_gateway.config import get_settings
 from orca_gateway.seam import Identity
+from orca_gateway.tenants import (
+    SLUG_PATTERN,
+    TenantStoreError,
+    TenantUnavailableError,
+    availability,
+    require_serving,
+)
 
 router = APIRouter()
 
+_SLUG = re.compile(SLUG_PATTERN)
 _TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$")
 _coalescer: TurnCoalescer | None = None
 
@@ -77,6 +86,15 @@ def _conversation_id(request: Request) -> str:
     return match.group(1)
 
 
+def _tenant_slug(request: Request) -> str:
+    """Which tenant this request is for. Set per agent in the platform's "Request headers".
+    There is NO default tenant: a missing or malformed header is a client error, never a guess."""
+    slug = request.headers.get("x-orca-tenant", "")
+    if not _SLUG.match(slug):
+        raise HTTPException(400, "missing or invalid X-Orca-Tenant header")
+    return slug
+
+
 def _last_user_text(messages: list[dict]) -> str:
     for message in reversed(messages):
         if message.get("role") != "user":
@@ -111,9 +129,18 @@ async def chat_completions(request: Request):
     turn = _last_user_text(messages)
     depth = len(messages)  # reliable turn index; trace-id alone cannot separate duplicates
 
-    settings = get_settings()
-    if not settings.voice_tenant:
-        raise HTTPException(503, "voice adapter not configured")
+    slug = _tenant_slug(request)
+    log = logging.getLogger("orca_gateway.channels.elevenlabs_llm")
+    try:
+        cfg = await deps.get_tenant_store().get(slug)
+        ch = require_serving(cfg, "voice")
+    except TenantUnavailableError as exc:
+        # Fail CLOSED and uniformly (no slug enumeration): unknown, inactive, disabled, killed.
+        log.warning("tenant refused slug=%s reason=%s", slug, exc.reason)
+        raise HTTPException(403, "tenant unavailable") from None
+    except TenantStoreError:
+        log.exception("tenant config unreachable slug=%s", slug)
+        raise HTTPException(503, "tenant config unavailable") from None
 
     backend = deps.get_backend()
 
@@ -122,10 +149,10 @@ async def chat_completions(request: Request):
         answer: str | None = None
         usage: dict | None = None
         async for event in backend.session(
-            agent_id=settings.voice_agent_id,
+            agent_id=ch.agent_id,
             channel="voice",
             identity=Identity(authority="anonymous"),
-            tenant=settings.voice_tenant,
+            tenant=slug,
             turn=text,
             conversation_id=conversation_id,
         ):
@@ -142,23 +169,26 @@ async def chat_completions(request: Request):
             raise UpstreamError("empty answer")
         return TurnResult(answer=text_out, usage=usage)
 
-    try:
-        result = await get_coalescer().submit(
-            conversation_id, depth, turn, work, request.is_disconnected
-        )
-    except ClientGoneError:
-        return Response(status_code=499)
-    except StaleTurnError:
-        # The conversation has moved past this turn. A non-2xx would be retried at the same
-        # depth and stay stale forever, so end it with a benign empty completion instead.
-        result = TurnResult(answer="", usage=None)
-    except Exception:
-        import logging
-
-        logging.getLogger("orca_gateway.channels.elevenlabs_llm").exception(
-            "voice turn failed conversation=%s depth=%s", conversation_id, depth
-        )
-        raise HTTPException(502, "upstream agent unavailable") from None
+    available = availability(cfg, ch, deps.now())
+    if not available.open and ch.out_of_hours_behaviour == "say_closed":
+        # Channel-level decision: the tenant chose to say it is closed rather than let the agent
+        # pick up. The backend is never called, so nothing can be offered or promised.
+        text = (ch.out_of_hours_message or "").replace("{brand}", ch.spoken_brand_name)
+        result = TurnResult(answer=text, usage=None)
+    else:
+        try:
+            result = await get_coalescer().submit(
+                conversation_id, depth, turn, work, request.is_disconnected
+            )
+        except ClientGoneError:
+            return Response(status_code=499)
+        except StaleTurnError:
+            # The conversation has moved past this turn. A non-2xx would be retried at the same
+            # depth and stay stale forever, so end it with a benign empty completion instead.
+            result = TurnResult(answer="", usage=None)
+        except Exception:
+            log.exception("voice turn failed conversation=%s depth=%s", conversation_id, depth)
+            raise HTTPException(502, "upstream agent unavailable") from None
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     model = body.get("model", "orca")

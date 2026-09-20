@@ -8,6 +8,18 @@ on:
 jobs:
   lint-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: orca
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      ORCA_TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/orca
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -15,5 +27,10 @@ jobs:
           python-version: "3.11"
       - run: uv sync
       - run: uv run ruff check .
-      - run: uv run pytest
+      # Migrations from EMPTY, then the bootstrap files must validate and insert. The DB tests
+      # below also re-migrate from empty per test; none are skipped here (the URL is set).
+      - run: uv run python -m orca_gateway.migrate --bootstrap config/bootstrap-tenants
+        env:
+          ORCA_DATABASE_URL: postgresql://postgres:test@localhost:5432/orca
+      - run: uv run pytest -rs
       - run: docker build -t orca-gateway:ci .

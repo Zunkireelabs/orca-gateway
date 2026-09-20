@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -13,14 +12,12 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="ORCA_", env_file=".env")
 
-    zunkiree_base_url: str = "https://staging-api.zunkireelabs.com"
-    # JSON object mapping our `tenant` id -> the backend's own tenant key.
-    # e.g. '{"my-tenant": "some-backend-tenant-key"}'
-    zunkiree_tenant_keys: str = "{}"
+    # Tenant config lives in Postgres (schema orca_gw). Required at runtime.
+    database_url: str = ""
+    # A config edit takes effect within this many seconds unless invalidated explicitly.
+    tenant_cache_ttl_s: float = 15.0
 
     # Voice channel adapter. All required at runtime; the route fails closed if unset.
-    voice_tenant: str = ""
-    voice_agent_id: str = "default"
     voice_shared_secret: str = ""
     voice_debounce_ms: int = 300
     # Max backend runs in flight ACROSS conversations. The stage backend has a 2-socket pool
@@ -32,9 +29,6 @@ class Settings(BaseSettings):
 
     # Commit the running image was built from (set by the Docker build).
     git_sha: str = "unknown"
-
-    def tenant_key_map(self) -> dict[str, str]:
-        return json.loads(self.zunkiree_tenant_keys)
 
 
 @lru_cache
