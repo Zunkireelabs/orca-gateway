@@ -10,12 +10,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from orca_gateway.backends.zunkiree import UnknownTenantError, ZunkireeAgentBackend
+from orca_gateway.channels import elevenlabs_llm
 from orca_gateway.config import get_settings
 from orca_gateway.seam import AgentBackend, Channel, Identity
 
 logger = logging.getLogger("orca_gateway.main")
 
 app = FastAPI(title="orca-gateway")
+app.include_router(elevenlabs_llm.router)
 
 
 @app.get("/health")

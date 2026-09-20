@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     # e.g. '{"my-tenant": "some-backend-tenant-key"}'
     zunkiree_tenant_keys: str = "{}"
 
+    # Voice channel adapter. All required at runtime; the route fails closed if unset.
+    voice_tenant: str = ""
+    voice_agent_id: str = "default"
+    voice_shared_secret: str = ""
+    voice_debounce_ms: int = 300
+
     def tenant_key_map(self) -> dict[str, str]:
         return json.loads(self.zunkiree_tenant_keys)
 
