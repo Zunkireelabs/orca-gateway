@@ -1,0 +1,36 @@
+# orca-gateway (stage). CI passes IMAGE_TAG=<full sha>; the VPS pulls, never builds.
+#
+# PUBLIC SURFACE = exactly `POST /chat/completions` and `GET /health`. Enforced HERE, in the
+# Traefik router rule, and not only in the app: this allowlist is what keeps any future
+# accidental route (e.g. an unauthenticated entry point) from being reachable.
+#
+# Run exactly ONE uvicorn worker. Turn de-duplication and the global backend-run cap live in
+# process memory; a second worker would silently split them.
+services:
+  orca-gateway-stage:
+    image: ghcr.io/zunkireelabs/orca-gateway:${IMAGE_TAG:?IMAGE_TAG must be set}
+    container_name: orca-gateway-stage
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.orca-gw-stage.rule=Host(`orca-gw-stage.zunkireelabs.com`) && ((Method(`POST`) && Path(`/chat/completions`)) || (Method(`GET`) && Path(`/health`)))"
+      - "traefik.http.routers.orca-gw-stage.entrypoints=websecure"
+      - "traefik.http.routers.orca-gw-stage.tls.certresolver=letsencrypt"
+      # HSTS — force HTTPS for ~1 year after first secure visit
+      - "traefik.http.middlewares.hsts-orca-gw-stage.headers.stsSeconds=31536000"
+      - "traefik.http.routers.orca-gw-stage.middlewares=hsts-orca-gw-stage"
+      - "traefik.http.services.orca-gw-stage.loadbalancer.server.port=8000"
+    networks:
+      - hosting
+
+networks:
+  hosting:
+    external: true

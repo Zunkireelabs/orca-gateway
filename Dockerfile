@@ -11,6 +11,10 @@ COPY README.md ./
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
+# Baked in at build time so /health can report exactly which commit is running.
+ARG GIT_SHA=unknown
+ENV ORCA_GIT_SHA=$GIT_SHA
+
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "orca_gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "orca_gateway.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

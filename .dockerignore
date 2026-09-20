@@ -1,0 +1,16 @@
+# Never let a secret or local state into the build context (and so into an image layer).
+.env
+.env.*
+!.env.example
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests
+docs
+*.md
+!README.md
+docker-compose*.yml
