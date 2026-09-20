@@ -25,8 +25,9 @@ which calls Zunkiree's `POST /api/v1/query/stream`. That adapter is the **only**
 a backend-specific tenant key or payload shape is allowed to exist — everything above it
 speaks `tenant` / `agent` / `channel` / `identity` / `turn`.
 
-`POST /v1/turn` is the channel-agnostic entry point a future voice/chat adapter calls; it
-runs one turn through the seam and streams the events back as SSE.
+Channel adapters call the seam **in-process** (`deps.get_backend().session(...)`); there is
+deliberately no HTTP entry point to the seam. A public route that reaches a tenant's backend
+must carry its own auth, as `POST /chat/completions` does (`ORCA_VOICE_SHARED_SECRET`).
 
 Configure the tenant → backend-tenant-key mapping via `ORCA_ZUNKIREE_TENANT_KEYS` (see
 `.env.example`). Never commit a real mapping.
