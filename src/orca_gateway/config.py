@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # hold a call open forever.
     voice_run_timeout_s: float = 25.0
 
+    # Commit the running image was built from (set by the Docker build).
+    git_sha: str = "unknown"
+
     def tenant_key_map(self) -> dict[str, str]:
         return json.loads(self.zunkiree_tenant_keys)
 

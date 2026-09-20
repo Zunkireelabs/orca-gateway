@@ -11,7 +11,8 @@ Zunkiree and is reached over HTTP through the seam.
 
 ## Status
 
-S2 — the seam. Local-first: no deploy, no VPS, no domain yet.
+S3b — deployed to stage at `https://orca-gw-stage.zunkireelabs.com` (see `docs/DEPLOY.md`).
+Public surface: `POST /chat/completions` and `GET /health` only.
 
 ## The seam
 

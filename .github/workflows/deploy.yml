@@ -1,0 +1,195 @@
+# push to main -> checks -> build image -> push GHCR -> ssh to VPS, pull, recreate -> verify from outside.
+# STAGE gateway only. Follows the house pattern (see zunkiree-search-v1 / edgeXcrm deploys).
+#
+# Safety: this workflow NEVER sends a conversational request. Verification is /health plus
+# requests that are rejected before reaching any backend. dental-city's ClinicMD credentials
+# are PRODUCTION, so a real turn through this gateway can make a real appointment.
+
+name: Deploy (stage)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-stage
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/zunkireelabs/orca-gateway
+  DOMAIN: orca-gw-stage.zunkireelabs.com
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run pytest
+
+  release:
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # No :latest (too easy to deploy stale code) and no --no-cache (layer cache is fine).
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:main
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.5
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          IMAGE_TAG: ${{ github.sha }}
+          ORCA_VOICE_SHARED_SECRET: ${{ secrets.ORCA_VOICE_SHARED_SECRET }}
+          ORCA_ZUNKIREE_TENANT_KEYS: ${{ secrets.ORCA_ZUNKIREE_TENANT_KEYS }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,ORCA_VOICE_SHARED_SECRET,ORCA_ZUNKIREE_TENANT_KEYS
+          script: |
+            set -e   # never `set -x`: this script handles secrets
+
+            for v in GHCR_TOKEN IMAGE_TAG ORCA_VOICE_SHARED_SECRET ORCA_ZUNKIREE_TENANT_KEYS; do
+              # [ -n ] only: never ${VAR:-default}, which would print the value.
+              if [ -z "$(printenv $v)" ]; then echo "::error::required secret/var $v is empty"; exit 1; fi
+            done
+
+            STAGE_DIR="/home/zunkireelabs/devprojects/orca-gateway-stage"
+            REPO_URL="https://github.com/Zunkireelabs/orca-gateway.git"
+            # HTTPS only (the VPS cannot use git@github.com: URLs). The workflow token is passed as
+            # a one-shot header, so it is never written into .git/config or a remote URL.
+            AUTH_HDR="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GHCR_TOKEN" | base64 | tr -d '\n')"
+
+            if [ ! -d "$STAGE_DIR/.git" ]; then
+              echo "=== First-time bootstrap: cloning repo ==="
+              mkdir -p "$STAGE_DIR"
+              git -c http.extraheader="$AUTH_HDR" clone "$REPO_URL" "$STAGE_DIR"
+            fi
+            cd "$STAGE_DIR"
+
+            echo "=== Resetting working tree to origin/main ==="
+            # Non-force `git checkout -B` alone PRESERVES uncommitted drift across deploys (the root
+            # cause of the recurring "VPS uncommitted edits" incidents). The reset --hard is what
+            # actually clobbers it; step 1 first guarantees we are on main.
+            git -c http.extraheader="$AUTH_HDR" fetch origin main
+            git checkout -B main origin/main
+            git reset --hard origin/main
+            [ "$(git rev-parse HEAD)" = "$IMAGE_TAG" ] || { echo "::error::checkout is not the commit being deployed"; exit 1; }
+
+            echo "=== Rendering .env from secrets (regenerated every deploy; never hand-edit) ==="
+            umask 077
+            {
+              echo "ORCA_ZUNKIREE_BASE_URL=https://staging-api.zunkireelabs.com"
+              echo "ORCA_VOICE_TENANT=dental-city"
+              echo "ORCA_VOICE_AGENT_ID=front-desk"
+              printf 'ORCA_VOICE_SHARED_SECRET=%s\n' "$ORCA_VOICE_SHARED_SECRET"
+              printf 'ORCA_ZUNKIREE_TENANT_KEYS=%s\n' "$ORCA_ZUNKIREE_TENANT_KEYS"
+              # Zunkiree stage has a 2-socket pool sharing a ceiling with PROD. Do not raise.
+              echo "ORCA_VOICE_MAX_CONCURRENT_RUNS=1"
+              echo "ORCA_VOICE_RUN_TIMEOUT_S=25.0"
+            } > .env
+            chmod 600 .env
+
+            echo "=== Pulling ghcr.io/zunkireelabs/orca-gateway:$IMAGE_TAG ==="
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            # A brand-new GHCR package can fail with permission_denied:read_package for ~30s
+            # after its first push. Retry; do not go changing settings.
+            ok=0
+            for i in 1 2 3 4 5 6; do
+              if docker pull "ghcr.io/zunkireelabs/orca-gateway:$IMAGE_TAG"; then ok=1; break; fi
+              echo "pull attempt $i failed, retrying in 15s"; sleep 15
+            done
+            [ "$ok" = 1 ] || { docker logout ghcr.io || true; echo "::error::image pull failed"; exit 1; }
+
+            echo "=== Recreating service ==="
+            IMAGE_TAG="$IMAGE_TAG" docker compose up -d --no-build --force-recreate orca-gateway-stage
+
+            echo "=== Verifying the RUNNING container reports this commit ==="
+            for i in 1 2 3 4 5 6; do
+              BODY=$(docker exec orca-gateway-stage python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/health').read().decode())" 2>/dev/null || true)
+              case "$BODY" in
+                *"\"sha\":\"$IMAGE_TAG\""*) echo "container healthy at $IMAGE_TAG"; docker logout ghcr.io || true; exit 0 ;;
+              esac
+              echo "attempt $i: not ready (${#BODY} bytes), waiting 10s"; sleep 10
+            done
+            echo "::error::container did not report sha $IMAGE_TAG"
+            docker logs orca-gateway-stage --tail 30 | sed -E 's/(Bearer )[^ ]+/\1***/g'
+            docker logout ghcr.io || true
+            exit 1
+
+  verify:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Verify from outside the VPS (no conversational request)
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -u
+          URL="https://${DOMAIN}"
+          # First deploy: Traefik may still be obtaining the certificate (ACME HTTP-01).
+          ok=0
+          for i in $(seq 1 30); do
+            BODY=$(curl -fsS -m 10 "$URL/health" 2>/dev/null || true)
+            case "$BODY" in *"\"sha\":\"$SHA\""*) ok=1; break ;; esac
+            echo "attempt $i: /health not serving $SHA yet"; sleep 10
+          done
+          [ "$ok" = 1 ] || { echo "::error::/health never reported $SHA"; exit 1; }
+          echo "OK  /health serves $SHA"
+
+          fail=0
+          check() { # name expected actual
+            if [ "$2" = "$3" ]; then echo "OK  $1 -> $3"; else echo "::error::$1 expected $2 got $3"; fail=1; fi
+          }
+          code() { curl -s -o /dev/null -m 10 -w '%{http_code}' "$@"; }
+
+          check "GET /docs"            404 "$(code "$URL/docs")"
+          check "GET /openapi.json"    404 "$(code "$URL/openapi.json")"
+          check "POST /v1/turn"        404 "$(code -X POST "$URL/v1/turn" -d '{}')"
+          check "GET /chat/completions" 404 "$(code "$URL/chat/completions")"   # method-filtered by Traefik
+          check "GET /"                404 "$(code "$URL/")"
+          # A wrong bearer is rejected BEFORE any backend call, so this cannot reach the clinic system.
+          check "POST /chat/completions wrong bearer" 401 "$(code -X POST "$URL/chat/completions" \
+            -H 'authorization: Bearer definitely-wrong' -H 'content-type: application/json' \
+            -H 'traceparent: 00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' \
+            -d '{"stream":true,"messages":[{"role":"user","content":"x"}]}')"
+          if curl -sI -m 10 "$URL/health" | grep -qi '^strict-transport-security:'; then
+            echo "OK  HSTS present"
+          else
+            echo "::error::HSTS header missing"; fail=1
+          fi
+          exit $fail
