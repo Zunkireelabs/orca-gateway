@@ -30,6 +30,7 @@ class ChannelConfig(BaseModel):
     channel: Channel
     is_enabled: bool = True
     agent_id: str = "default"
+    elevenlabs_agent_id: str | None = None
     languages: list[str] = Field(min_length=1)
     default_language: str
     voice_id: str | None = None

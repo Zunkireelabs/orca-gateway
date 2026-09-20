@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Commit the running image was built from (set by the Docker build).
     git_sha: str = "unknown"
 
+    # Metering (S5). A call is considered ended when no turn arrives for its conversation_id for
+    # this long -- there is no telephony hangup signal to end it on (see 0002_calls.sql). Swept
+    # periodically, not on the request path.
+    metering_idle_timeout_s: float = 300.0
+    metering_sweep_interval_s: float = 60.0
+
 
 @lru_cache
 def get_settings() -> Settings:

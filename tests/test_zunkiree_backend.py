@@ -1,10 +1,42 @@
+import typing
+
 import httpx
 import pytest
 
-from orca_gateway.backends.zunkiree import ZunkireeAgentBackend
-from orca_gateway.seam import Identity
+from orca_gateway.backends.zunkiree import ZunkireeAgentBackend, _to_turn_event
+from orca_gateway.seam import Identity, TurnEvent
 from orca_gateway.tenants import TenantStore, TenantUnavailableError
 from tests.tenant_fixtures import InMemoryRepo, dental_city
+
+# Every wire event type Zunkiree is known to send, mapped to the wire payload that produces it.
+# Kept next to seam.py's declared TurnEvent.type Literal below so a new member added there without
+# a matching case here fails loudly instead of silently falling into the catch-all.
+_KNOWN_WIRE_EVENTS: dict[str, dict] = {
+    "token": {"type": "token", "data": "hi"},
+    "tool": {"type": "tool_call", "name": "get_hours", "status": "running"},
+    "usage": {"type": "usage", "data": {"model": "gpt-4o-mini", "total_tokens": 42}},
+    "done": {"type": "done", "answer": "hi", "sources": []},
+    "error": {"type": "error", "message": "backend blew up"},
+}
+
+
+def test_every_declared_turn_event_type_has_a_real_backend_case() -> None:
+    """A declared TurnEvent.type with no corresponding case in _to_turn_event silently falls into
+    the catch-all, which FABRICATES an error event ("unrecognized event type: ...") instead of
+    dropping or forwarding the real one -- worse than doing nothing. Regression for the 'usage'
+    case going missing since S2 despite being part of the seam's contract the whole time."""
+    declared_types = set(typing.get_args(TurnEvent.model_fields["type"].annotation))
+    assert declared_types == set(_KNOWN_WIRE_EVENTS), (
+        "a TurnEvent.type was added or removed in seam.py without updating this test's "
+        "_KNOWN_WIRE_EVENTS -- add the wire payload that should produce it"
+    )
+    for expected_type, wire_event in _KNOWN_WIRE_EVENTS.items():
+        result = _to_turn_event(wire_event)
+        assert result.type == expected_type
+        if result.type == "error":
+            # the one type allowed to legitimately be "error" -- must be the real message,
+            # never the catch-all's fabricated one.
+            assert result.data["message"] == "backend blew up"
 
 SSE_BODY = (
     b'data: {"type": "tool_call", "name": "get_hours", "status": "running"}\n\n'

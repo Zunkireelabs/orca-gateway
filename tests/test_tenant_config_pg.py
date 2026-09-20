@@ -21,16 +21,27 @@ def test_migrations_run_from_empty_create_only_orca_gw_and_are_idempotent(pg_url
                 "where table_schema in ('orca_gw', 'public')"
             )
         }
-        assert set(tables) == {"tenants", "tenant_channels", "schema_migrations"}
+        assert set(tables) == {
+            "tenants",
+            "tenant_channels",
+            "calls",
+            "tenant_daily_spend",
+            "schema_migrations",
+        }
         assert set(tables.values()) == {"orca_gw"}  # nothing created in public
         rls = dict(
             conn.execute(
                 "select relname, relrowsecurity from pg_class c join pg_namespace n "
                 "on n.oid = c.relnamespace where n.nspname = 'orca_gw' and relkind = 'r' "
-                "and relname in ('tenants', 'tenant_channels')"
+                "and relname in ('tenants', 'tenant_channels', 'calls', 'tenant_daily_spend')"
             )
         )
-        assert rls == {"tenants": True, "tenant_channels": True}
+        assert rls == {
+            "tenants": True,
+            "tenant_channels": True,
+            "calls": True,
+            "tenant_daily_spend": True,
+        }
 
 
 def test_editing_an_applied_migration_is_refused(pg_url, tmp_path):

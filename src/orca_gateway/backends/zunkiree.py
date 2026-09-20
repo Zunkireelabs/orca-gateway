@@ -89,5 +89,7 @@ def _to_turn_event(event: dict) -> TurnEvent:
         )
     if event_type == "error":
         return TurnEvent(type="error", data={"message": event.get("message", "")})
+    if event_type == "usage":
+        return TurnEvent(type="usage", data=event.get("data", {}))
     logger.warning("unrecognized backend event type=%s", event_type)
     return TurnEvent(type="error", data={"message": f"unrecognized event type: {event_type}"})
