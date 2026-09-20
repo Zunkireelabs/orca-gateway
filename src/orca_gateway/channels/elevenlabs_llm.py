@@ -149,7 +149,9 @@ async def chat_completions(request: Request):
     except ClientGoneError:
         return Response(status_code=499)
     except StaleTurnError:
-        raise HTTPException(409, "superseded by a later turn") from None
+        # The conversation has moved past this turn. A non-2xx would be retried at the same
+        # depth and stay stale forever, so end it with a benign empty completion instead.
+        result = TurnResult(answer="", usage=None)
     except Exception:
         import logging
 

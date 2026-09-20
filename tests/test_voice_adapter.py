@@ -161,3 +161,22 @@ async def test_usage_chunk_only_when_backend_reports_it(wired):
     elevenlabs_llm._coalescer = TurnCoalescer(debounce_s=0.0)
     r = await _post(headers=_headers(tp=f"00-{'1' * 32}-8a2e73c1d4f50b96-01"))
     assert '"prompt_tokens": 3' in r.text
+
+
+async def test_stale_depth_gets_benign_empty_200_not_a_retryable_error(wired):
+    later = _body()
+    later["messages"] += [{"role": "assistant", "content": "a"}, {"role": "user", "content": "x"}]
+    assert (await _post(body=later)).status_code == 200  # depth 5 advances the conversation
+    calls_before = len(wired.calls)
+    r = await _post(body=_body())  # depth 3: superseded
+    assert r.status_code == 200 and r.text.rstrip().endswith("[DONE]")
+    assert json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"] == ""
+    assert len(wired.calls) == calls_before  # stale turn never reaches the backend
+
+
+async def test_upstream_failure_then_retry_at_same_depth_succeeds(wired):
+    wired.events = [TurnEvent(type="error", data={"message": "boom"})]
+    assert (await _post()).status_code == 502
+    wired.events = None
+    r = await _post()  # the platform's retry, same depth and same trace-id
+    assert r.status_code == 200 and "final:hello" in r.text

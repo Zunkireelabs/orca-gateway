@@ -141,3 +141,19 @@ async def test_hung_backend_times_out_instead_of_waiting_forever():
 
     with pytest.raises(TimeoutError):
         await c.submit("t", 3, "a", hang, _never_gone)
+
+
+async def test_failed_turn_is_not_cached_so_a_retry_reruns_the_backend():
+    c = TurnCoalescer(debounce_s=0.0)
+    calls: list[str] = []
+
+    async def flaky(text: str) -> str:
+        calls.append(text)
+        if len(calls) == 1:
+            raise ConnectionError("transient")
+        return "ok"
+
+    with pytest.raises(ConnectionError):
+        await c.submit("t", 3, "a", flaky, _never_gone)
+    assert await c.submit("t", 3, "a", flaky, _never_gone) == "ok"
+    assert len(calls) == 2

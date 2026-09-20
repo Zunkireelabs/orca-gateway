@@ -81,7 +81,7 @@ class TurnCoalescer:
         entry = conv.entries.get(depth)
         if entry is None:
             entry = conv.entries[depth] = _Entry(text=text)
-            entry.task = asyncio.create_task(self._run(entry, work, None))
+            entry.task = asyncio.create_task(self._run(conv, depth, entry, work, None))
         elif not entry.result.done() and entry.text != text:
             # Newer hypothesis for the same turn: restart, after the old run has fully stopped
             # so at most one backend call per conversation is ever in flight.
@@ -89,7 +89,7 @@ class TurnCoalescer:
             if prev is not None:
                 prev.cancel()
             entry.text = text
-            entry.task = asyncio.create_task(self._run(entry, work, prev))
+            entry.task = asyncio.create_task(self._run(conv, depth, entry, work, prev))
 
         entry.waiters += 1
         try:
@@ -105,7 +105,9 @@ class TurnCoalescer:
                 if conv.entries.get(depth) is entry:
                     del conv.entries[depth]
 
-    async def _run(self, entry: _Entry, work, prev: asyncio.Task | None) -> None:
+    async def _run(
+        self, conv: _Conversation, depth: int, entry: _Entry, work, prev: asyncio.Task | None
+    ) -> None:
         if prev is not None:
             with contextlib.suppress(BaseException):
                 await prev
@@ -120,6 +122,10 @@ class TurnCoalescer:
             if not entry.result.done():
                 entry.result.set_exception(exc)
                 entry.result.exception()  # mark retrieved; waiters may all be gone
+            # Failures are not cached: the platform retries a failed request at the same
+            # depth, and that retry must run the backend again, not replay the error.
+            if conv.entries.get(depth) is entry:
+                del conv.entries[depth]
         else:
             if not entry.result.done():
                 entry.result.set_result(outcome)
