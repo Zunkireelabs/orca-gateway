@@ -63,7 +63,7 @@ async def test_record_turn_keeps_first_elevenlabs_agent_id_seen(repo, tenant):
     assert call is not None
 
 
-async def test_record_usage_accumulates_across_turns_and_computes_cost(repo, tenant, pg_url):
+async def test_complete_turn_usage_accumulates_across_turns_and_computes_cost(repo, tenant, pg_url):
     await repo.record_turn(
         tenant_slug=tenant,
         channel="voice",
@@ -71,11 +71,13 @@ async def test_record_usage_accumulates_across_turns_and_computes_cost(repo, ten
         agent_id="front-desk",
         elevenlabs_agent_id=None,
     )
-    await repo.record_usage(
-        conversation_id="conv-3", model="gpt-4o-mini", prompt_tokens=100, completion_tokens=20
+    await repo.complete_turn(
+        conversation_id="conv-3",
+        usage={"model": "gpt-4o-mini", "prompt_tokens": 100, "completion_tokens": 20},
     )
-    await repo.record_usage(
-        conversation_id="conv-3", model="gpt-4o-mini", prompt_tokens=50, completion_tokens=10
+    await repo.complete_turn(
+        conversation_id="conv-3",
+        usage={"model": "gpt-4o-mini", "prompt_tokens": 50, "completion_tokens": 10},
     )
 
     with psycopg.connect(pg_url) as conn:
@@ -89,10 +91,11 @@ async def test_record_usage_accumulates_across_turns_and_computes_cost(repo, ten
     assert float(cost) == cost_usd("gpt-4o-mini", 150, 30)
 
 
-async def test_record_usage_for_unknown_conversation_is_dropped_not_fabricated(repo):
+async def test_complete_turn_usage_for_unknown_conversation_is_dropped_not_fabricated(repo):
     # No exception, no row created out of thin air -- just a documented no-op (logged).
-    await repo.record_usage(
-        conversation_id="ghost", model="gpt-4o-mini", prompt_tokens=10, completion_tokens=1
+    await repo.complete_turn(
+        conversation_id="ghost",
+        usage={"model": "gpt-4o-mini", "prompt_tokens": 10, "completion_tokens": 1},
     )
 
 
@@ -104,8 +107,9 @@ async def test_close_call_rolls_cost_into_tenant_daily_spend(repo, tenant, pg_ur
         agent_id="front-desk",
         elevenlabs_agent_id=None,
     )
-    await repo.record_usage(
-        conversation_id="conv-4", model="gpt-4o-mini", prompt_tokens=1000, completion_tokens=200
+    await repo.complete_turn(
+        conversation_id="conv-4",
+        usage={"model": "gpt-4o-mini", "prompt_tokens": 1000, "completion_tokens": 200},
     )
     await repo.close_call("conv-4", "completed")
 
@@ -129,8 +133,9 @@ async def test_close_call_is_idempotent_does_not_double_count_spend(repo, tenant
         agent_id="front-desk",
         elevenlabs_agent_id=None,
     )
-    await repo.record_usage(
-        conversation_id="conv-5", model="gpt-4o-mini", prompt_tokens=1000, completion_tokens=200
+    await repo.complete_turn(
+        conversation_id="conv-5",
+        usage={"model": "gpt-4o-mini", "prompt_tokens": 1000, "completion_tokens": 200},
     )
     await repo.close_call("conv-5", "completed")
     await repo.close_call("conv-5", "completed")  # already ended: must be a no-op

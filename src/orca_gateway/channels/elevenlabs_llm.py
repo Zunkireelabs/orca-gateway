@@ -14,6 +14,8 @@ before any audio starts, never a half-spoken sentence.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -40,7 +42,7 @@ from orca_gateway.tenants import (
 router = APIRouter()
 
 _SLUG = re.compile(SLUG_PATTERN)
-_TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$")
+_TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$")
 # max_session_seconds exceeded (S5 brief §3.4): a call-center-generic message, not tenant-authored
 # like out_of_hours_message, since there is nothing product-specific about a session time limit.
 _SESSION_LIMIT_MESSAGE = (
@@ -98,6 +100,11 @@ def _conversation_id(request: Request) -> str:
     return match.group(1)
 
 
+def _span_id(request: Request) -> str:
+    match = _TRACEPARENT.match(request.headers.get("traceparent", ""))
+    return match.group(2) if match else "-"
+
+
 def _tenant_slug(request: Request) -> str:
     """Which tenant this request is for. Set per agent in the platform's "Request headers".
     There is NO default tenant: a missing or malformed header is a client error, never a guess."""
@@ -132,6 +139,7 @@ def _chunk(completion_id: str, model: str, **choice) -> str:
 
 @router.post("/chat/completions")
 async def chat_completions(request: Request):
+    arrived = time.monotonic()  # taken first: the uvicorn access line is written at RESPONSE time
     _authorize(request)
     conversation_id = _conversation_id(request)
     body = await request.json()
@@ -143,6 +151,20 @@ async def chat_completions(request: Request):
 
     slug = _tenant_slug(request)
     log = logging.getLogger("orca_gateway.channels.elevenlabs_llm")
+
+    def log_arrival(decision: str) -> None:
+        # Observability only. The hash, never the text: a turn can contain caller PII.
+        log.info(
+            "voice request arrival conversation=%s depth=%d text_sha=%s span=%s "
+            "arrived_mono=%.3f decision=%s",
+            conversation_id,
+            depth,
+            hashlib.sha256(turn.encode()).hexdigest()[:12],
+            _span_id(request),
+            arrived,
+            decision,
+        )
+
     # Metering is a add-on to serving, never a precondition for it: if it cannot even be
     # constructed (e.g. no database configured), every check below degrades to "skip metering"
     # rather than turning into an unrelated 500 on every call.
@@ -173,43 +195,67 @@ async def chat_completions(request: Request):
 
     backend = deps.get_backend()
 
-    async def record_turn() -> None:
+    async def _metering(what: str, call) -> object | None:
+        """Metering is an add-on: a failure is logged and never reaches the caller."""
         if metering is None:
-            return
+            return None
         try:
-            await metering.record_turn(
+            return await call()
+        except Exception:
+            log.exception("metering %s failed slug=%s conversation=%s", what, slug, conversation_id)
+            return None
+
+    async def touch():
+        return await _metering(
+            "touch_call",
+            lambda: metering.touch_call(
                 tenant_slug=slug,
                 channel="voice",
                 conversation_id=conversation_id,
                 agent_id=ch.agent_id,
                 elevenlabs_agent_id=ch.elevenlabs_agent_id,
-            )
-        except Exception:
-            log.exception(
-                "metering record_turn failed slug=%s conversation=%s", slug, conversation_id
-            )
+            ),
+        )
+
+    async def complete(usage: dict | None) -> None:
+        await _metering(
+            "complete_turn",
+            lambda: metering.complete_turn(conversation_id=conversation_id, usage=usage),
+        )
+
+    async def abandon() -> None:
+        # Shielded: this runs while the run is being cancelled, and must still land.
+        await _metering(
+            "record_abandoned_run",
+            lambda: asyncio.shield(metering.record_abandoned_run(conversation_id)),
+        )
 
     async def work(text: str) -> TurnResult:
-        # Deliberately the ONLY place daily_spend_cap / max_session_seconds are read and
-        # record_turn is written: the coalescer guarantees `work()` runs exactly once per real
-        # turn, no matter how many duplicate raw HTTP requests the platform fans a spoken turn
-        # into (S1). Doing these DB round trips in the handler BEFORE calling
-        # `get_coalescer().submit()` would run once per duplicate (inflating turn_count) AND add
-        # variable per-duplicate latency ahead of the very race the coalescer exists to resolve
-        # deterministically -- regression-tested by test_fan_out_of_four_variants_makes_exactly
-        # _one_backend_call, which is timing-sensitive to exactly this.
+        # The ONLY place metering is read and written for a turn. The coalescer runs `work()`
+        # once per RUN, and only one run per spoken turn completes (the platform fans a turn out
+        # into duplicate requests that share one result, and a newer speech hypothesis cancels
+        # and restarts the run). So: usage and the turn count are recorded when a run COMPLETES
+        # (never at its start, and never per raw HTTP request), and runs that reach the backend
+        # but do not complete are counted as abandoned. DB round trips must stay out of the
+        # handler BEFORE `get_coalescer().submit()`: they perturb the race the coalescer resolves
+        # (test_fan_out_of_four_variants_makes_exactly_one_backend_call is sensitive to it).
         #
-        # daily_spend_cap only gates a call's FIRST turn (no row yet) -- an already-running call
-        # is never cut off mid-conversation by a cap it started under (S5 brief §3.4). Metering
-        # being unreachable fails OPEN: a metering outage must not become a full serving outage
-        # on top of it, the same call the tenant store's own stale-cache grace period makes
-        # elsewhere.
+        # daily_spend_cap gates a call's FIRST turn only -- a call already running is never cut
+        # off mid-conversation by a cap it started under (S5 brief 3.4). Metering being
+        # unreachable fails OPEN: a metering outage must not become a serving outage.
         existing_call = None
         if metering is not None:
             try:
                 existing_call = await metering.get_open_call(conversation_id)
             except Exception:
                 log.exception("metering unreachable checking call state slug=%s", slug)
+            if existing_call is not None and existing_call.ended_reason == "daily_spend_cap":
+                log.warning(
+                    "daily_spend_cap still refusing tenant=%s conversation=%s",
+                    slug,
+                    conversation_id,
+                )
+                raise DailySpendCapExceeded()
             if existing_call is None and ch.daily_spend_cap is not None:
                 try:
                     spend = await metering.daily_spend_usd(slug)
@@ -218,10 +264,21 @@ async def chat_completions(request: Request):
                     log.exception("metering unreachable reading daily spend slug=%s", slug)
                 if spend is not None and spend >= ch.daily_spend_cap:
                     log.warning(
-                        "tenant refused slug=%s reason=daily_spend_cap spend=%.6f cap=%.2f",
+                        "daily_spend_cap tripped tenant=%s conversation=%s spend=%.6f cap=%.2f",
                         slug,
+                        conversation_id,
                         spend,
                         ch.daily_spend_cap,
+                    )
+                    await _metering(
+                        "refuse_call",
+                        lambda: metering.refuse_call(
+                            tenant_slug=slug,
+                            channel="voice",
+                            conversation_id=conversation_id,
+                            agent_id=ch.agent_id,
+                            elevenlabs_agent_id=ch.elevenlabs_agent_id,
+                        ),
                     )
                     raise DailySpendCapExceeded()
 
@@ -229,35 +286,51 @@ async def chat_completions(request: Request):
             elapsed = (deps.now() - existing_call.started_at).total_seconds()
             if elapsed > ch.max_session_seconds:
                 # A clean handoff-style response, never a hard error mid-sentence (S5 brief
-                # §3.4). The call itself stays open -- closed later by the idle-timeout sweep
-                # once the caller actually stops talking, not unilaterally by this one turn.
-                await record_turn()
+                # 3.4). The call is closed on the row now (ended_reason 'max_session'); the
+                # gateway cannot hang up, so later turns get the same handoff.
+                log.warning(
+                    "max_session_seconds tripped tenant=%s conversation=%s elapsed=%.1fs limit=%ds",
+                    slug,
+                    conversation_id,
+                    elapsed,
+                    ch.max_session_seconds,
+                )
+                await _metering(
+                    "close_call", lambda: metering.close_call(conversation_id, "max_session")
+                )
                 text = _SESSION_LIMIT_MESSAGE.replace("{brand}", ch.spoken_brand_name)
                 return TurnResult(answer=text, usage=None)
 
-        await record_turn()
+        await touch()
         answer_tokens: list[str] = []
         answer: str | None = None
         usage: dict | None = None
-        async for event in backend.session(
-            agent_id=ch.agent_id,
-            channel="voice",
-            identity=Identity(authority="anonymous"),
-            tenant=slug,
-            turn=text,
-            conversation_id=conversation_id,
-        ):
-            if event.type == "token":
-                answer_tokens.append(event.data.get("text", ""))
-            elif event.type == "done":
-                answer = event.data.get("answer", "")
-            elif event.type == "usage":
-                usage = event.data
-            elif event.type == "error":
-                raise UpstreamError(event.data.get("message", ""))
-        text_out = answer if answer is not None else "".join(answer_tokens)
-        if not text_out.strip():
-            raise UpstreamError("empty answer")
+        completed = False
+        try:
+            async for event in backend.session(
+                agent_id=ch.agent_id,
+                channel="voice",
+                identity=Identity(authority="anonymous"),
+                tenant=slug,
+                turn=text,
+                conversation_id=conversation_id,
+            ):
+                if event.type == "token":
+                    answer_tokens.append(event.data.get("text", ""))
+                elif event.type == "done":
+                    answer = event.data.get("answer", "")
+                elif event.type == "usage":
+                    usage = event.data
+                elif event.type == "error":
+                    raise UpstreamError(event.data.get("message", ""))
+            text_out = answer if answer is not None else "".join(answer_tokens)
+            if not text_out.strip():
+                raise UpstreamError("empty answer")
+            completed = True
+        finally:
+            if not completed:
+                await abandon()
+        await complete(usage)
         return TurnResult(answer=text_out, usage=usage)
 
     available = availability(cfg, ch, deps.now())
@@ -266,13 +339,20 @@ async def chat_completions(request: Request):
         # pick up. The backend is never called, so nothing can be offered or promised. Not
         # coalesced (pre-dates S5): a duplicate raw request here records more than one turn, an
         # acceptable, low-stakes inaccuracy since no backend cost is ever attached to this path.
-        await record_turn()
+        log_arrival("not_coalesced")
+        await touch()
+        await complete(None)
         text = (ch.out_of_hours_message or "").replace("{brand}", ch.spoken_brand_name)
         result = TurnResult(answer=text, usage=None)
     else:
         try:
             result = await get_coalescer().submit(
-                conversation_id, depth, turn, work, request.is_disconnected
+                conversation_id,
+                depth,
+                turn,
+                work,
+                request.is_disconnected,
+                on_decision=log_arrival,
             )
         except DailySpendCapExceeded:
             raise HTTPException(403, "tenant unavailable") from None
@@ -285,17 +365,6 @@ async def chat_completions(request: Request):
         except Exception:
             log.exception("voice turn failed conversation=%s depth=%s", conversation_id, depth)
             raise HTTPException(502, "upstream agent unavailable") from None
-
-    if result.usage and metering is not None:
-        try:
-            await metering.record_usage(
-                conversation_id=conversation_id,
-                model=result.usage.get("model", ""),
-                prompt_tokens=result.usage.get("prompt_tokens", 0),
-                completion_tokens=result.usage.get("completion_tokens", 0),
-            )
-        except Exception:
-            log.exception("metering record_usage failed conversation=%s", conversation_id)
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     model = body.get("model", "orca")

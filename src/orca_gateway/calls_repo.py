@@ -2,9 +2,10 @@
 `tenant_daily_spend`). Same discipline as tenant_repo.py: one short-lived connection per call.
 
 `conversation_id` is the idempotency key everywhere here: a call has many turns and must produce
-exactly one row in `orca_gw.calls`, never one per turn. `record_turn` is the only write on the hot
-path (every turn); everything else (usage, closing, daily-spend) is a follow-on write gated by that
-first insert already having happened.
+exactly one row in `orca_gw.calls`, never one per turn. On the hot path `touch_call` makes the row
+exist when a run starts and `complete_turn` counts the turn and its usage when a run COMPLETES:
+never at run start and never per raw HTTP request, or every coalescer restart and duplicate request
+would be counted again.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ class CallState:
     started_at: object  # datetime; typed loosely to avoid importing tz machinery here
     turn_count: int
     ended_at: object | None
+    ended_reason: str | None = None
 
 
 class PgCallsRepository:
@@ -51,7 +53,7 @@ class PgCallsRepository:
         (max_session_seconds)."""
         async with await self._connect() as conn:
             cur = await conn.execute(
-                "select id, started_at, turn_count, ended_at from orca_gw.calls "
+                "select id, started_at, turn_count, ended_at, ended_reason from orca_gw.calls "
                 "where conversation_id = %s",
                 (conversation_id,),
             )
@@ -86,7 +88,7 @@ class PgCallsRepository:
                 "  elevenlabs_agent_id = coalesce(orca_gw.calls.elevenlabs_agent_id, "
                 "                                 excluded.elevenlabs_agent_id) "
                 "where orca_gw.calls.ended_at is null "
-                "returning id, started_at, turn_count, ended_at",
+                "returning id, started_at, turn_count, ended_at, ended_reason",
                 (tenant_slug, channel, conversation_id, agent_id, elevenlabs_agent_id),
             )
             row = await cur.fetchone()
@@ -97,49 +99,121 @@ class PgCallsRepository:
                     conversation_id,
                 )
                 cur = await conn.execute(
-                    "select id, started_at, turn_count, ended_at from orca_gw.calls "
+                    "select id, started_at, turn_count, ended_at, ended_reason from orca_gw.calls "
                     "where conversation_id = %s",
                     (conversation_id,),
                 )
                 row = await cur.fetchone()
             return CallState(**row)
 
-    async def record_usage(
+    async def touch_call(
         self,
         *,
+        tenant_slug: str,
+        channel: str,
         conversation_id: str,
-        model: str,
-        prompt_tokens: int,
-        completion_tokens: int,
-    ) -> None:
-        """Accumulates token counts across all turns of the call (a conversation's real dollar
-        cost is the sum over its turns, not just the last one) and recomputes llm_cost_usd from
-        the running total. `model` is assumed constant across a conversation; the last value
-        written wins if that assumption is ever wrong."""
+        agent_id: str,
+        elevenlabs_agent_id: str | None,
+    ) -> CallState:
+        """Ensures the row exists and bumps last_turn_at (so the idle sweep cannot close a call
+        whose turn is still running), WITHOUT counting a turn. A turn is counted once, when a run
+        completes (`complete_turn`): counting at run START would count every coalescer restart of
+        the same spoken turn again."""
         async with await self._connect() as conn:
+            cur = await conn.execute(
+                "insert into orca_gw.calls "
+                "(tenant_id, channel, conversation_id, agent_id, elevenlabs_agent_id, "
+                " started_at, last_turn_at, turn_count) "
+                "values ((select id from orca_gw.tenants where slug = %s), %s, %s, %s, %s, "
+                "        now(), now(), 0) "
+                "on conflict (conversation_id) do update set "
+                "  last_turn_at = case when orca_gw.calls.ended_at is null then now() "
+                "                      else orca_gw.calls.last_turn_at end, "
+                "  elevenlabs_agent_id = coalesce(orca_gw.calls.elevenlabs_agent_id, "
+                "                                 excluded.elevenlabs_agent_id) "
+                "returning id, started_at, turn_count, ended_at, ended_reason",
+                (tenant_slug, channel, conversation_id, agent_id, elevenlabs_agent_id),
+            )
+            return CallState(**await cur.fetchone())
+
+    async def complete_turn(self, *, conversation_id: str, usage: dict | None) -> None:
+        """Called once per COMPLETED run: counts the turn and adds that run's usage, in one
+        transaction. Usage is recorded only when the backend reported a model and both token
+        counts; a partial or absent payload leaves the columns as they were (null = unknown),
+        never a defaulted zero. Turn count and last_turn_at only move on a still-open call."""
+        async with await self._connect() as conn, conn.transaction():
+            cur = await conn.execute(
+                "update orca_gw.calls set "
+                "  turn_count = turn_count + (case when ended_at is null then 1 else 0 end), "
+                "  last_turn_at = case when ended_at is null then now() else last_turn_at end, "
+                "  updated_at = now() "
+                "where conversation_id = %s returning id",
+                (conversation_id,),
+            )
+            if await cur.fetchone() is None:
+                logger.warning("completed turn for unknown conversation_id=%s", conversation_id)
+                return
+            model = (usage or {}).get("model")
+            prompt = (usage or {}).get("prompt_tokens")
+            completion = (usage or {}).get("completion_tokens")
+            if not (isinstance(model, str) and model and isinstance(prompt, int)
+                    and isinstance(completion, int)):
+                if usage:
+                    logger.warning(
+                        "incomplete usage payload for conversation_id=%s", conversation_id
+                    )
+                return
             cur = await conn.execute(
                 "update orca_gw.calls set "
                 "  llm_prompt_tokens = coalesce(llm_prompt_tokens, 0) + %s, "
                 "  llm_completion_tokens = coalesce(llm_completion_tokens, 0) + %s, "
-                "  llm_model = %s, "
-                "  updated_at = now() "
+                "  llm_model = %s, updated_at = now() "
                 "where conversation_id = %s "
                 "returning llm_prompt_tokens, llm_completion_tokens, llm_model",
-                (prompt_tokens, completion_tokens, model, conversation_id),
+                (prompt, completion, model, conversation_id),
             )
             row = await cur.fetchone()
-            if row is None:
-                logger.warning(
-                    "usage event for unknown conversation_id=%s dropped", conversation_id
-                )
-                return
             cost = cost_usd(
                 row["llm_model"], row["llm_prompt_tokens"], row["llm_completion_tokens"]
             )
             await conn.execute(
-                "update orca_gw.calls set llm_cost_usd = %s, updated_at = now() "
-                "where conversation_id = %s",
+                "update orca_gw.calls set llm_cost_usd = %s where conversation_id = %s",
                 (cost, conversation_id),
+            )
+
+    async def record_abandoned_run(self, conversation_id: str) -> None:
+        """A run that reached the backend but never completed (cancelled by a coalescer restart,
+        timed out, or failed). Its provider-side cost, if any, is invisible to us: usage arrives
+        only at the end of a completed stream. We cannot record a number we never received (and
+        must not estimate one), so this counts the runs whose cost is missing instead."""
+        async with await self._connect() as conn:
+            await conn.execute(
+                "update orca_gw.calls set abandoned_run_count = abandoned_run_count + 1, "
+                "updated_at = now() where conversation_id = %s",
+                (conversation_id,),
+            )
+
+    async def refuse_call(
+        self,
+        *,
+        tenant_slug: str,
+        channel: str,
+        conversation_id: str,
+        agent_id: str,
+        elevenlabs_agent_id: str | None,
+    ) -> None:
+        """A call refused at its first turn by daily_spend_cap: recorded as an already-closed
+        row with zero turns (idempotent), so the refusal is visible. Not rolled into
+        tenant_daily_spend -- nothing was served."""
+        async with await self._connect() as conn:
+            await conn.execute(
+                "insert into orca_gw.calls "
+                "(tenant_id, channel, conversation_id, agent_id, elevenlabs_agent_id, "
+                " started_at, last_turn_at, ended_at, ended_reason, turn_count) "
+                "values ((select id from orca_gw.tenants where slug = %s), %s, %s, %s, %s, "
+                "        now(), now(), now(), 'daily_spend_cap', 0) "
+                "on conflict (conversation_id) do nothing",
+                (tenant_slug, channel, conversation_id, agent_id, elevenlabs_agent_id),
             )
 
     async def close_call(self, conversation_id: str, ended_reason: EndedReason) -> None:

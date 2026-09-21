@@ -157,3 +157,18 @@ async def test_failed_turn_is_not_cached_so_a_retry_reruns_the_backend():
         await c.submit("t", 3, "a", flaky, _never_gone)
     assert await c.submit("t", 3, "a", flaky, _never_gone) == "ok"
     assert len(calls) == 2
+
+
+async def test_a_failing_on_decision_callback_cannot_change_the_outcome():
+    coalescer = TurnCoalescer(debounce_s=0.01)
+
+    async def work(text):
+        return f"done:{text}"
+
+    async def not_gone():
+        return False
+
+    def boom(_decision):
+        raise RuntimeError("logging blew up")
+
+    assert await coalescer.submit("c", 1, "hi", work, not_gone, on_decision=boom) == "done:hi"
