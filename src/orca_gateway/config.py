@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     # hold a call open forever.
     voice_run_timeout_s: float = 25.0
 
+    # Numbers are spoken as words on voice (see channels/number_speech.py). A switch, not a
+    # setting to tune: turn it off only to compare against the raw model text.
+    voice_number_speech: bool = True
+
     # Commit the running image was built from (set by the Docker build).
     git_sha: str = "unknown"
 

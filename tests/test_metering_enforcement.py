@@ -409,3 +409,17 @@ async def test_a_cap_refusal_records_a_turn_with_no_answer(wired):
     assert (await _post(body=_body("hi"))).status_code == 403
     [row] = _turns(pg_url)
     assert (row[0], row[1], row[2], row[7]) == (3, "hi", None, "daily_spend_cap")
+
+
+async def test_the_stored_transcript_keeps_the_agents_text_while_the_caller_hears_words(wired):
+    backend, _, pg_url = wired
+
+    async def session(**kw):
+        yield TurnEvent(type="done", data={"answer": "मूल्य १,००,००० रुपैयाँ छ", "sources": []})
+
+    backend.session = session
+    r = await _post(body=_body("मूल्य कति हो"))
+    heard = json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"]
+    assert heard == "मूल्य एक लाख रुपैयाँ छ"
+    [(_, user, answer, *_rest)] = _turns(pg_url)
+    assert answer == "मूल्य १,००,००० रुपैयाँ छ"  # what the agent said, not the spoken form

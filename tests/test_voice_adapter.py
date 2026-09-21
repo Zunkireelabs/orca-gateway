@@ -266,3 +266,36 @@ async def test_arrival_log_marks_a_different_text_after_the_answer_as_joined_aft
     # both texts appear only as hashes, and they differ
     hashes = [x["text_sha"] for x in _arrivals(caplog)]
     assert hashes[0] != hashes[1] and "clear final" not in caplog.text
+
+
+async def test_numbers_in_the_final_answer_are_spoken_as_words(wired, caplog):
+    wired.events = [
+        TurnEvent(type="token", data={"text": "provisional 5"}),
+        TurnEvent(
+            type="done",
+            data={"answer": "\"Oral Surgery\" को मूल्य १,००,००० रुपैयाँ छ, समय 16:30।", "sources": []},
+        ),
+    ]
+    with caplog.at_level(logging.INFO, logger=ARRIVAL_LOGGER):
+        r = await _post()
+    content = json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"]
+    assert content == "\"Oral Surgery\" को मूल्य एक लाख रुपैयाँ छ, समय दिउँसो साढे चार बजे।"
+    line = next(m for m in caplog.messages if m.startswith("voice number speech"))
+    assert "conversations=2" in line and "'number': 1" in line and "'time': 1" in line
+    assert "लाख" not in caplog.text and "१,००,०००" not in caplog.text  # counts only, never text
+
+
+async def test_an_answer_with_no_numbers_is_untouched_and_logs_nothing(wired, caplog):
+    wired.events = [TurnEvent(type="done", data={"answer": "नमस्ते, कसरी मद्दत गरौँ?", "sources": []})]
+    with caplog.at_level(logging.INFO, logger=ARRIVAL_LOGGER):
+        r = await _post()
+    assert json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"] == "नमस्ते, कसरी मद्दत गरौँ?"
+    assert not [m for m in caplog.messages if m.startswith("voice number speech")]
+
+
+async def test_the_switch_turns_number_speech_off(wired, monkeypatch):
+    monkeypatch.setenv("ORCA_VOICE_NUMBER_SPEECH", "false")
+    get_settings.cache_clear()
+    wired.events = [TurnEvent(type="done", data={"answer": "मूल्य 1,00,000 छ", "sources": []})]
+    r = await _post()
+    assert json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"] == "मूल्य 1,00,000 छ"
