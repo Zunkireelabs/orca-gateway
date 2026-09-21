@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # periodically, not on the request path.
     metering_idle_timeout_s: float = 300.0
     metering_sweep_interval_s: float = 60.0
+    # Transcript rows (orca_gw.turns) older than this are purged by the sweep; calls, costs and
+    # labels are kept. Decided 2026-09-21; revisit when call-recording legality is answered.
+    metering_turn_retention_days: int = 30
 
 
 @lru_cache

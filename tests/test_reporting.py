@@ -27,6 +27,7 @@ async def seeded(pg_url):
     )
     await calls.complete_turn(
         conversation_id="dc-closed",
+        depth=3,
         usage={"model": "gpt-4o-mini", "prompt_tokens": 1000, "completion_tokens": 200},
     )
     await calls.close_call("dc-closed", "completed")

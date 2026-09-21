@@ -59,6 +59,10 @@ class _Conversation:
     # waits for it, so "at most one backend call per conversation in flight" survives a newer
     # depth arriving while an older committed run is still going.
     running: asyncio.Task | None = None
+    # depth -> how the requests for that turn were handled: {"requests": n, "started": n,
+    # "restarted": n, "joined": n, "joined_late": n, "stale": n, "first_arrival": monotonic}.
+    # Observability only (the transcript row stores it); never read by the coalescing logic.
+    tallies: dict[int, dict] = field(default_factory=dict)
 
 
 class TurnCoalescer:
@@ -91,8 +95,15 @@ class TurnCoalescer:
         (different text, run already committed) -- for observability only; it never changes the
         outcome."""
         self._prune()
+        conv = self._convs.setdefault(conversation_id, _Conversation())
+        conv.last_seen = time.monotonic()
 
         def decide(decision: str) -> None:
+            tally = conv.tallies.setdefault(
+                depth, {"requests": 0, "first_arrival": time.monotonic()}
+            )
+            tally["requests"] += 1
+            tally[decision] = tally.get(decision, 0) + 1
             if on_decision is None:
                 return
             try:
@@ -100,8 +111,6 @@ class TurnCoalescer:
             except Exception:  # observability must never change what the coalescer does
                 pass
 
-        conv = self._convs.setdefault(conversation_id, _Conversation())
-        conv.last_seen = time.monotonic()
         if depth < conv.max_depth:
             decide("stale")
             raise StaleTurnError(depth)
@@ -149,6 +158,12 @@ class TurnCoalescer:
                 self._abort(entry, ClientGoneError(depth))
                 if conv.entries.get(depth) is entry:
                     del conv.entries[depth]
+
+    def summary(self, conversation_id: str, depth: int) -> dict | None:
+        """How the requests for this turn were handled so far (a copy), or None if unknown."""
+        conv = self._convs.get(conversation_id)
+        tally = None if conv is None else conv.tallies.get(depth)
+        return None if tally is None else dict(tally)
 
     async def _run(
         self, conv: _Conversation, depth: int, entry: _Entry, work, prev: asyncio.Task | None

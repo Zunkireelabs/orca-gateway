@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI):
                 deps.get_calls_repo(),
                 idle_s=settings.metering_idle_timeout_s,
                 interval_s=settings.metering_sweep_interval_s,
+                retention_days=settings.metering_turn_retention_days,
             )
         )
     else:

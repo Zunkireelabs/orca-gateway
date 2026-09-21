@@ -16,6 +16,7 @@ from datetime import date
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from orca_gateway.cost import cost_usd
 
@@ -136,28 +137,75 @@ class PgCallsRepository:
             )
             return CallState(**await cur.fetchone())
 
-    async def complete_turn(self, *, conversation_id: str, usage: dict | None) -> None:
-        """Called once per COMPLETED run: counts the turn and adds that run's usage, in one
-        transaction. Usage is recorded only when the backend reported a model and both token
-        counts; a partial or absent payload leaves the columns as they were (null = unknown),
-        never a defaulted zero. Turn count and last_turn_at only move on a still-open call."""
+    async def complete_turn(
+        self,
+        *,
+        conversation_id: str,
+        depth: int,
+        usage: dict | None,
+        user_text: str | None = None,
+        answer_text: str | None = None,
+        tools: list[dict] | None = None,
+        latency_ms: int | None = None,
+        coalescer: dict | None = None,
+        ended_by: str | None = None,
+    ) -> None:
+        """Called once per COMPLETED run, and the ONLY place a turn is counted, its usage added
+        and its transcript row written, all in one transaction. The transcript row is unique on
+        (call, depth): if it already exists this whole call is a no-op, so nothing here can
+        double-count a depth however it is reached (the S5 bug). Usage is recorded only when the
+        backend reported a model and both token counts; a partial or absent payload leaves the
+        columns as they were (null = unknown), never a defaulted zero. Turn count and
+        last_turn_at only move on a still-open call. The text columns are PII: never log them."""
         async with await self._connect() as conn, conn.transaction():
             cur = await conn.execute(
+                "select id from orca_gw.calls where conversation_id = %s", (conversation_id,)
+            )
+            call = await cur.fetchone()
+            if call is None:
+                logger.warning("completed turn for unknown conversation_id=%s", conversation_id)
+                return
+            cur = await conn.execute(
+                "insert into orca_gw.turns (call_id, depth, user_text, answer_text, tools, "
+                " usage, latency_ms, coalescer, ended_by) "
+                "values (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "on conflict (call_id, depth) do nothing returning id",
+                (
+                    call["id"],
+                    depth,
+                    user_text,
+                    answer_text,
+                    Jsonb(tools or []),
+                    None if usage is None else Jsonb(usage),
+                    latency_ms,
+                    None if coalescer is None else Jsonb(coalescer),
+                    ended_by,
+                ),
+            )
+            if await cur.fetchone() is None:
+                logger.info(
+                    "turn already recorded conversation_id=%s depth=%s; not counting again",
+                    conversation_id,
+                    depth,
+                )
+                return
+            await conn.execute(
                 "update orca_gw.calls set "
                 "  turn_count = turn_count + (case when ended_at is null then 1 else 0 end), "
                 "  last_turn_at = case when ended_at is null then now() else last_turn_at end, "
                 "  updated_at = now() "
-                "where conversation_id = %s returning id",
-                (conversation_id,),
+                "where id = %s",
+                (call["id"],),
             )
-            if await cur.fetchone() is None:
-                logger.warning("completed turn for unknown conversation_id=%s", conversation_id)
-                return
             model = (usage or {}).get("model")
             prompt = (usage or {}).get("prompt_tokens")
             completion = (usage or {}).get("completion_tokens")
-            if not (isinstance(model, str) and model and isinstance(prompt, int)
-                    and isinstance(completion, int)):
+            if not (
+                isinstance(model, str)
+                and model
+                and isinstance(prompt, int)
+                and isinstance(completion, int)
+            ):
                 if usage:
                     logger.warning(
                         "incomplete usage payload for conversation_id=%s", conversation_id
@@ -168,18 +216,28 @@ class PgCallsRepository:
                 "  llm_prompt_tokens = coalesce(llm_prompt_tokens, 0) + %s, "
                 "  llm_completion_tokens = coalesce(llm_completion_tokens, 0) + %s, "
                 "  llm_model = %s, updated_at = now() "
-                "where conversation_id = %s "
+                "where id = %s "
                 "returning llm_prompt_tokens, llm_completion_tokens, llm_model",
-                (prompt, completion, model, conversation_id),
+                (prompt, completion, model, call["id"]),
             )
             row = await cur.fetchone()
             cost = cost_usd(
                 row["llm_model"], row["llm_prompt_tokens"], row["llm_completion_tokens"]
             )
             await conn.execute(
-                "update orca_gw.calls set llm_cost_usd = %s where conversation_id = %s",
-                (cost, conversation_id),
+                "update orca_gw.calls set llm_cost_usd = %s where id = %s",
+                (cost, call["id"]),
             )
+
+    async def purge_turns(self, retention_days: int) -> int:
+        """Deletes transcript rows older than the retention window (run by the sweep). Calls,
+        costs and labels are untouched. Returns how many rows were purged."""
+        async with await self._connect() as conn:
+            cur = await conn.execute(
+                "delete from orca_gw.turns where created_at < now() - make_interval(days => %s)",
+                (retention_days,),
+            )
+            return cur.rowcount
 
     async def record_abandoned_run(self, conversation_id: str) -> None:
         """A run that reached the backend but never completed (cancelled by a coalescer restart,
