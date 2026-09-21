@@ -8,6 +8,7 @@ import concurrent.futures
 import psycopg
 
 from orca_gateway.migrate import migrate
+from tests.conftest import MIGRATIONS
 
 
 def test_concurrent_migrate_runs_never_double_apply(pg_url, tmp_path):
@@ -24,4 +25,5 @@ def test_concurrent_migrate_runs_never_double_apply(pg_url, tmp_path):
     assert sorted(results, key=len) == [[], [], ["0002_slow.sql"]]
     with psycopg.connect(pg_url) as conn:
         versions = {r[0] for r in conn.execute("select version from orca_gw.schema_migrations")}
-    assert versions == {"0001_tenants.sql", "0002_calls.sql", "0002_slow.sql"}
+    # every real migration (whatever exists today) plus the raced one, each applied exactly once
+    assert versions == {f.name for f in MIGRATIONS.glob("*.sql")} | {"0002_slow.sql"}

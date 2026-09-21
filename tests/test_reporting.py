@@ -25,8 +25,9 @@ async def seeded(pg_url):
         agent_id="front-desk",
         elevenlabs_agent_id=None,
     )
-    await calls.record_usage(
-        conversation_id="dc-closed", model="gpt-4o-mini", prompt_tokens=1000, completion_tokens=200
+    await calls.complete_turn(
+        conversation_id="dc-closed",
+        usage={"model": "gpt-4o-mini", "prompt_tokens": 1000, "completion_tokens": 200},
     )
     await calls.close_call("dc-closed", "completed")
 

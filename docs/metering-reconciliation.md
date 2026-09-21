@@ -23,6 +23,21 @@ that never gets a `usage` event keeps `llm_prompt_tokens`/`llm_completion_tokens
 `null` (see `orca_gw.tenant_daily_spend.unpriced_call_count` for how the aggregate reports this
 honestly instead of collapsing it to `$0`).
 
+### When usage and turns are counted (fixed in the follow-up to S5)
+
+Usage and the turn count are recorded when a backend run COMPLETES, inside `work()`, once. The
+first cut recorded usage in the handler after the coalescer, so every duplicate raw request
+sharing one result added the same tokens again (a 6-request fan-out recorded exactly 6x), and
+counted the turn at run start, so every coalescer restart counted again. Rows written before
+that fix (calls up to 2026-09-21) are overstated and were not rewritten.
+
+`abandoned_run_count` counts runs that reached the backend but never completed (cancelled by a
+restart, timed out, failed). The provider probably still bills a request that was already sent,
+but usage only arrives at the end of a completed stream, so for those runs there is no number to
+record and estimating one is forbidden. We record the count instead: a call with abandoned runs
+has a real cost at or above `llm_cost_usd`. Closing that gap needs the backend to report usage
+for a run it is cancelled out of, or a reconcile against the provider's own usage export.
+
 ## STT minutes and TTS characters (`stt_minutes`, `tts_characters`)
 
 **A real, per-call reconciliation source exists — checked in ElevenLabs' own API docs on
@@ -84,6 +99,15 @@ as a webhook this cycle). Decided and implemented:
   webhook if one is added later).
 - `ended_reason = 'error'` is reserved similarly — a single failed turn does not prove the call is
   over (the caller may just keep talking), so this slice does not set it proactively.
+
+## Enforcement outcomes on the row
+
+- `max_session_seconds` trip: WARNING log `max_session_seconds tripped tenant=.. conversation=..
+  elapsed=..s limit=..s`, and the row is closed with `ended_reason = 'max_session'`. The gateway
+  cannot hang up, so later turns get the same spoken handoff (English only for now).
+- `daily_spend_cap` trip: WARNING log `daily_spend_cap tripped tenant=.. conversation=.. spend=..
+  cap=..`, and an already-closed row with `ended_reason = 'daily_spend_cap'` and zero turns is
+  written (not counted in `tenant_daily_spend`). Retries of that conversation keep being refused.
 
 ## `per_caller_rate_limit`
 
