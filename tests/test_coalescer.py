@@ -87,6 +87,21 @@ async def test_slow_backend_and_alternating_hypotheses_make_exactly_one_backend_
     assert seen.count("joined_late") == 10 and seen.count("joined") == 9
 
 
+async def test_different_text_after_the_run_finished_is_joined_after_done_not_joined():
+    """A different text arriving once the run has answered gets the cached answer to the EARLIER
+    text. It must be distinguishable in the log from an identical retry ('joined'): that is how an
+    interim hypothesis answered before the final transcript shows up."""
+    c, w = TurnCoalescer(debounce_s=0.0), _Work(delay=0.05)
+    seen, on = _decisions()
+    assert await c.submit("t", 5, "interim", w, _never_gone, on_decision=on) == "answer:interim"
+    assert await c.submit("t", 5, "interim", w, _never_gone, on_decision=on) == "answer:interim"
+    assert await c.submit("t", 5, "the final text", w, _never_gone, on_decision=on) == (
+        "answer:interim"  # the later text is NOT answered
+    )
+    assert seen == ["started", "joined", "joined_after_done"]
+    assert w.started == ["interim"]  # and it does not run again (that policy is not decided yet)
+
+
 async def test_all_waiters_gone_before_the_backend_is_called_aborts_for_free():
     c, w = TurnCoalescer(debounce_s=1.0), _Work(delay=1.0)
 

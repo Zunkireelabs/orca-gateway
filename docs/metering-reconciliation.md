@@ -123,7 +123,9 @@ at response time, so it says nothing about when a request arrived):
 text arrived inside the debounce window, before anything reached the backend, so the pending run
 was replaced for free), `joined` (same text as the existing run), `joined_late` (DIFFERENT text
 arriving after the run was committed to the backend: it joins that run and gets its answer, it
-never cancels it), `stale` (the conversation already moved past this depth), or `not_coalesced`
+never cancels it), `joined_after_done` (different text arriving after the run already
+answered: it gets the cached answer to the EARLIER text, so the later text was never answered; seen
+when an early interim speech hypothesis is answered before the final transcript arrives), `stale` (the conversation already moved past this depth), or `not_coalesced`
 (answered without the backend). Only a hash of the text is logged, never the text: a turn can contain caller PII. Logging
 only, no behaviour change. The package logger now has its own handler; before this, every INFO line
 from `orca_gateway` (including the idle-sweep line) was silently dropped in the container.
