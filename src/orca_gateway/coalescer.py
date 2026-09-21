@@ -4,15 +4,28 @@ A voice platform may send several requests for ONE spoken turn (one per speech-r
 hypothesis), all sharing a conversation id and a history depth, and abort the losers later.
 Running each against the backend multiplies load and risks repeating side effects.
 
-This coalesces them: per conversation at most one backend run is in flight, requests at the
-same depth share one result, the newest hypothesis wins, and a run is aborted when nobody is
-left waiting for it. It knows nothing about what a turn means.
+This coalesces them: per conversation at most one backend run is in flight and requests at the
+same depth share one result. It knows nothing about what a turn means.
+
+The commit rule (the point of this module's safety story): a run is FREE to cancel only until it
+is COMMITTED, and it commits the moment `work()` starts (after the debounce and after a run slot
+is won). Before that, a newer hypothesis for the same turn restarts it (the newest wins), a newer
+depth supersedes it, and it is aborted if every waiter disconnects: nothing has been handed to the
+backend, so nothing can be half-done. After that, NOTHING cancels it because a request arrived:
+- a request at the same depth with different text JOINS the in-flight run and gets its answer
+  (`joined_late`); the first text the backend saw wins;
+- a newer depth does not cancel it; its own callers are told the turn is stale and it runs to
+  completion in the background, and the newer depth's run waits for it;
+- if every waiter disconnects it is STILL left to finish. A backend call may have side effects the
+  gateway cannot see (this module is product-blind), and a write must land or fail, never
+  half-land. Its answer stays cached for a retry at the same depth.
+The only remaining cancellation of a committed run is the run timeout, a safety bound so a hung
+backend cannot hold a slot forever; it is not triggered by any request.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -34,6 +47,7 @@ class _Entry:
     )
     task: asyncio.Task | None = None
     waiters: int = 0
+    committed: bool = False  # work() has started: from here on nothing cancels this run
 
 
 @dataclass
@@ -41,6 +55,10 @@ class _Conversation:
     entries: dict[int, _Entry] = field(default_factory=dict)
     max_depth: int = -1
     last_seen: float = field(default_factory=time.monotonic)
+    # The committed run still executing for this conversation (any depth), if any: a later run
+    # waits for it, so "at most one backend call per conversation in flight" survives a newer
+    # depth arriving while an older committed run is still going.
+    running: asyncio.Task | None = None
 
 
 class TurnCoalescer:
@@ -69,7 +87,9 @@ class TurnCoalescer:
     ):
         """Run (or join) the turn at `depth`. `gone()` reports this caller disconnecting.
         `on_decision`, if given, is told what was decided for THIS request -- "stale", "started",
-        "restarted" or "joined" -- for observability only; it never changes the outcome."""
+        "restarted" (newer text, run not yet committed), "joined" (same text) or "joined_late"
+        (different text, run already committed) -- for observability only; it never changes the
+        outcome."""
         self._prune()
 
         def decide(decision: str) -> None:
@@ -87,7 +107,12 @@ class TurnCoalescer:
             raise StaleTurnError(depth)
         if depth > conv.max_depth:
             for old_depth, old in list(conv.entries.items()):
-                self._abort(old, StaleTurnError(old_depth))
+                if old.committed and not old.result.done():
+                    # Already handed to the backend: its callers are told the turn is stale, but
+                    # the run itself is never cancelled by this arrival (see module docstring).
+                    self._release(old, StaleTurnError(old_depth))
+                else:
+                    self._abort(old, StaleTurnError(old_depth))
                 del conv.entries[old_depth]
             conv.max_depth = depth
 
@@ -96,9 +121,9 @@ class TurnCoalescer:
             decide("started")
             entry = conv.entries[depth] = _Entry(text=text)
             entry.task = asyncio.create_task(self._run(conv, depth, entry, work, None))
-        elif not entry.result.done() and entry.text != text:
-            # Newer hypothesis for the same turn: restart, after the old run has fully stopped
-            # so at most one backend call per conversation is ever in flight.
+        elif not entry.result.done() and entry.text != text and not entry.committed:
+            # Newer hypothesis for the same turn, and nothing has reached the backend yet:
+            # restarting is free. Restart, after the old run has fully stopped.
             decide("restarted")
             prev = entry.task
             if prev is not None:
@@ -106,7 +131,8 @@ class TurnCoalescer:
             entry.text = text
             entry.task = asyncio.create_task(self._run(conv, depth, entry, work, prev))
         else:
-            decide("joined")
+            # Same text, or a run that is already committed (or finished): share its result.
+            decide("joined_late" if entry.text != text and not entry.result.done() else "joined")
 
         entry.waiters += 1
         try:
@@ -117,7 +143,9 @@ class TurnCoalescer:
             return entry.result.result()
         finally:
             entry.waiters -= 1
-            if entry.waiters == 0 and not entry.result.done():
+            if entry.waiters == 0 and not entry.result.done() and not entry.committed:
+                # Nobody is left and nothing has reached the backend: free to abort. A committed
+                # run is deliberately left to finish (its result stays cached for a retry).
                 self._abort(entry, ClientGoneError(depth))
                 if conv.entries.get(depth) is entry:
                     del conv.entries[depth]
@@ -125,14 +153,24 @@ class TurnCoalescer:
     async def _run(
         self, conv: _Conversation, depth: int, entry: _Entry, work, prev: asyncio.Task | None
     ) -> None:
+        me = asyncio.current_task()
+        # `wait`, never `await prev`: awaiting a task directly would let OUR cancellation cancel
+        # it too (and it may be a committed run), and would raise its outcome at us.
         if prev is not None:
-            with contextlib.suppress(BaseException):
-                await prev
+            await asyncio.wait({prev})
+        while conv.running is not None and conv.running is not me and not conv.running.done():
+            await asyncio.wait({conv.running})
         await asyncio.sleep(self._debounce_s)
         try:
             async with asyncio.timeout(self._run_timeout_s):
                 async with self._slots:
-                    outcome = await work(entry.text)
+                    entry.committed = True  # no await between winning the slot and this line
+                    conv.running = me
+                    try:
+                        outcome = await work(entry.text)
+                    finally:
+                        if conv.running is me:
+                            conv.running = None
         except asyncio.CancelledError:
             raise  # restarted, superseded or abandoned; the canceller settles the future
         except Exception as exc:
@@ -146,6 +184,13 @@ class TurnCoalescer:
         else:
             if not entry.result.done():
                 entry.result.set_result(outcome)
+
+    @staticmethod
+    def _release(entry: _Entry, exc: Exception) -> None:
+        """Tell this entry's callers `exc` WITHOUT cancelling its run (which is committed)."""
+        if not entry.result.done():
+            entry.result.set_exception(exc)
+            entry.result.exception()
 
     @staticmethod
     def _abort(entry: _Entry, exc: Exception) -> None:

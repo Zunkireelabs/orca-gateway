@@ -31,8 +31,10 @@ sharing one result added the same tokens again (a 6-request fan-out recorded exa
 counted the turn at run start, so every coalescer restart counted again. Rows written before
 that fix (calls up to 2026-09-21) are overstated and were not rewritten.
 
-`abandoned_run_count` counts runs that reached the backend but never completed (cancelled by a
-restart, timed out, failed). The provider probably still bills a request that was already sent,
+`abandoned_run_count` counts runs that reached the backend but never completed. Since the
+coalescer's commit rule (below) a request can no longer cancel such a run, so it now means real
+failures: a backend error, or the run timeout. Before that rule, coalescer restarts were the main
+source (16 in one 90s call). The provider probably still bills a request that was already sent,
 but usage only arrives at the end of a completed stream, so for those runs there is no number to
 record and estimating one is forbidden. We record the count instead: a call with abandoned runs
 has a real cost at or above `llm_cost_usd`. Closing that gap needs the backend to report usage
@@ -118,9 +120,11 @@ at response time, so it says nothing about when a request arrived):
     span=<traceparent span id> arrived_mono=<monotonic seconds> decision=<...>
 
 `decision` is what the coalescer did with THIS request: `started` (new run), `restarted` (a newer
-text for the same turn cancelled the in-flight run), `joined` (shares an existing run's result),
-`stale` (the conversation already moved past this depth), or `not_coalesced` (answered without the
-backend). Only a hash of the text is logged, never the text: a turn can contain caller PII. Logging
+text arrived inside the debounce window, before anything reached the backend, so the pending run
+was replaced for free), `joined` (same text as the existing run), `joined_late` (DIFFERENT text
+arriving after the run was committed to the backend: it joins that run and gets its answer, it
+never cancels it), `stale` (the conversation already moved past this depth), or `not_coalesced`
+(answered without the backend). Only a hash of the text is logged, never the text: a turn can contain caller PII. Logging
 only, no behaviour change. The package logger now has its own handler; before this, every INFO line
 from `orca_gateway` (including the idle-sweep line) was silently dropped in the container.
 
@@ -129,3 +133,16 @@ from `orca_gateway` (including the idle-sweep line) was silently dropped in the 
 Stored, not enforced — no telephony, no caller ID, no phone number exists at the gateway today, so
 there is no identity to enforce against. Documented as inert, same pattern as S4's
 `take_message`/`handoff_anyway`.
+
+## The coalescer's commit rule
+
+A run is free to cancel only until it is COMMITTED (the moment `work()` starts, after the debounce
+and after a run slot is won). Before that, a newer hypothesis restarts it, a newer depth supersedes
+it, and it is aborted if every waiter disconnects. After that, no request cancels it: a different
+text joins it (`joined_late`), a newer depth lets it finish (its own callers are told the turn is
+stale, and the newer depth's run waits for it), and if every waiter disconnects it still finishes
+and its answer stays cached for a retry at the same depth. Why: the gateway is product-blind and
+cannot know a backend call has no side effect; a write must land or fail, never half-land. The one
+remaining cancellation is the run timeout (`voice_run_timeout_s`), a safety bound so a hung backend
+cannot hold the slot forever; no request triggers it. Tuning `voice_debounce_ms` is deliberately
+left alone.
