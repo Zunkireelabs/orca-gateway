@@ -23,6 +23,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -423,7 +424,9 @@ async def chat_completions(request: Request):
     # it can never raise, and anything ambiguous passes through unchanged.
     spoken = result.answer
     if get_settings().voice_number_speech:
-        speech = verbalize(result.answer)
+        # the year of 'today' where the tenant is, so a date in this year is read without it
+        this_year = deps.now().astimezone(ZoneInfo(cfg.timezone)).year
+        speech = verbalize(result.answer, current_year=this_year)
         spoken = speech.text
         if speech.converted:
             # counts by class only: never the text (it can hold caller data)

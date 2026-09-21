@@ -281,7 +281,7 @@ async def test_numbers_in_the_final_answer_are_spoken_as_words(wired, caplog):
     content = json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"]
     assert content == "\"Oral Surgery\" को मूल्य एक लाख रुपैयाँ छ, समय दिउँसो साढे चार बजे।"
     line = next(m for m in caplog.messages if m.startswith("voice number speech"))
-    assert "conversations=2" in line and "'number': 1" in line and "'time': 1" in line
+    assert "conversations=2" in line and "'currency': 1" in line and "'time': 1" in line
     assert "लाख" not in caplog.text and "१,००,०००" not in caplog.text  # counts only, never text
 
 
@@ -299,3 +299,22 @@ async def test_the_switch_turns_number_speech_off(wired, monkeypatch):
     wired.events = [TurnEvent(type="done", data={"answer": "मूल्य 1,00,000 छ", "sources": []})]
     r = await _post()
     assert json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"] == "मूल्य 1,00,000 छ"
+
+
+@pytest.mark.parametrize(
+    "utc_now,spoken",
+    [
+        # 2026-12-31 20:00 UTC is already 2027-01-01 in Kathmandu, so 2026 is NOT the current year
+        ("2026-12-31T20:00:00+00:00", "मिति डिसेम्बर एकतीस, दुई हजार छब्बीस हो"),
+        ("2026-06-01T06:00:00+00:00", "मिति डिसेम्बर एकतीस हो"),
+    ],
+)
+async def test_the_current_year_is_the_tenants_local_year_not_utc(
+    wired, monkeypatch, utc_now, spoken
+):
+    from datetime import datetime
+
+    monkeypatch.setattr(deps, "now", lambda: datetime.fromisoformat(utc_now))
+    wired.events = [TurnEvent(type="done", data={"answer": "मिति 2026-12-31 हो", "sources": []})]
+    r = await _post()
+    assert json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"] == spoken

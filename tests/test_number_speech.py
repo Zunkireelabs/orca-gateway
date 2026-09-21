@@ -86,11 +86,33 @@ def test_nepali_rows(given, expected):
     assert say(given) == expected
 
 
-def test_iso_date_keeps_the_year_rather_than_silently_dropping_it():
-    # The brief's table shows only the month and day; dropping the year would lose information, so
-    # it is spoken too (flagged in the PR for a decision).
+def verbalize_in(text: str, year: int | None) -> str:
+    return verbalize(text, current_year=year).text
+
+
+def test_a_date_in_the_current_year_is_read_without_the_year():
+    assert verbalize_in("मिति 2026-09-22 हो", 2026) == "मिति सेप्टेम्बर बाइस हो"
+    assert verbalize_in("मिति २०२६-०९-०५ हो", 2026) == "मिति सेप्टेम्बर पाँच हो"
+    assert verbalize_in("मिति 22 September 2026 हो", 2026) == "मिति सेप्टेम्बर बाइस हो"
+    assert verbalize_in("मिति September 22, 2026 हो", 2026) == "मिति सेप्टेम्बर बाइस हो"
+    assert verbalize_in("मिति 22 September हो", 2026) == "मिति सेप्टेम्बर बाइस हो"  # none given
+
+
+def test_a_date_in_any_other_year_keeps_its_year():
+    assert verbalize_in("मिति 2027-01-05 हो", 2026) == "मिति जनवरी पाँच, दुई हजार सत्ताइस हो"
+    assert verbalize_in("मिति 2025-12-31 हो", 2026) == "मिति डिसेम्बर एकतीस, दुई हजार पच्चीस हो"
+    assert verbalize_in("मिति 22 September 2027 हो", 2026) == (
+        "मिति सेप्टेम्बर बाइस, दुई हजार सत्ताइस हो"
+    )
+
+
+def test_when_the_current_year_is_unknown_every_year_is_kept():
     assert say("मिति 2026-09-22 हो") == "मिति सेप्टेम्बर बाइस, दुई हजार छब्बीस हो"
-    assert say("मिति २०२६-०९-०५ हो") == "मिति सेप्टेम्बर पाँच, दुई हजार छब्बीस हो"
+
+
+def test_year_dropping_never_touches_anything_but_a_dates_year():
+    # a bare '2026' is a number, not a date: it is still spoken in full
+    assert verbalize_in("साल 2026 हो", 2026) == "साल दुई हजार छब्बीस हो"
 
 
 def test_quarter_and_half_hour_forms():
@@ -294,3 +316,38 @@ def test_a_long_unseparated_digit_run_is_a_phone_like_string_and_keeps_every_dig
     spoken = say("यो 10000000000 हो")
     toks = spoken.split()[1:-1]
     assert toks == ["एक"] + ["शून्य"] * 10  # 11 digits, every one kept in order
+
+
+# ---- a trailing rupee word marks an amount ----------------------------------------------------
+
+SUFFIXES = ["रुपैयाँ", "रुपैया", "rupees"]
+
+
+def test_a_trailing_rupee_word_makes_a_long_digit_run_an_amount_not_a_phone_number():
+    assert say("मूल्य 1500000 रुपैयाँ छ") == "मूल्य पन्ध्र लाख रुपैयाँ छ"
+    assert say("मूल्य १५००००० रुपैया छ") == "मूल्य पन्ध्र लाख रुपैया छ"
+    assert say("मूल्य 1500000 rupees छ") == "मूल्य पन्ध्र लाख rupees छ"
+    assert say("मूल्य १,००,००० रुपैयाँ छ") == "मूल्य एक लाख रुपैयाँ छ"
+    assert say("मूल्य 2000.0 रुपैयाँ छ") == "मूल्य दुई हजार रुपैयाँ छ"
+    # without the rupee word, the same digits are still a phone-like string
+    assert say("मूल्य 1500000 छ") == "मूल्य एक पाँच शून्य शून्य शून्य शून्य शून्य छ"
+
+
+def test_amounts_with_a_trailing_rupee_word_round_trip():
+    for n in amounts():
+        for f in (str(n), indian(n), str(n).translate(DEV)):
+            for suf in SUFFIXES:
+                out = say(f"मूल्य {f} {suf} छ")
+                assert out.startswith("मूल्य ") and out.endswith(f" {suf} छ"), (f, suf, out)
+                words = out[len("मूल्य ") : -len(f" {suf} छ")]
+                assert parse_number_words(words) == n, (f, suf, out)
+
+
+def test_a_trailing_rupee_word_after_an_ambiguous_number_passes_through():
+    for text in ["मूल्य 2000.5 रुपैयाँ छ", "मूल्य -5 रुपैयाँ छ", "मूल्य 1,2,3 रुपैयाँ छ"]:
+        assert say(text) == text
+
+
+def test_english_with_a_trailing_rupee_word_only_cleans_a_trailing_point_zero():
+    assert say("It costs 2000.0 rupees") == "It costs 2000 rupees"
+    assert say("It costs 1500000 rupees") == "It costs 1500000 rupees"  # not read as a phone number

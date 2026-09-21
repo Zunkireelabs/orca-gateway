@@ -17,6 +17,10 @@ The guard that matters: a conversion must never change a value, and anything amb
 through UNCHANGED (logged at DEBUG as a pattern class only, never text). A wrong conversion is
 worse than none. The output contains no digits, so running it twice changes nothing.
 
+Amounts: a rupee marker BEFORE the number (रु, Rs, NPR) or the rupee word AFTER it (रुपैयाँ,
+रुपैया, rupees) makes it an amount, so a long run of digits is read as an amount, not a phone
+number. A date in the current year (in the tenant's timezone) is read without the year.
+
 REVIEW NEEDED (native ear): the 1-99 table's spellings and the judgment calls flagged below
 (डेढ/अढाई for 1:30/2:30, the period boundaries, the year kept on ISO dates). The property test
 proves the arithmetic round-trips, not that a spelling is idiomatic.
@@ -155,6 +159,8 @@ _CUR = r"(?<![A-Za-zऀ-ॿ])(?:रु|Rs|NPR|USD|\$)\.?\s*"
 _TOKEN = re.compile(
     rf"""
       (?P<cur>{_CUR}(?P<amt>{_D}+(?:,{_D}+)*(?:\.{_D}+)?))
+    | (?P<curs>(?<![\d०-९.,])(?P<samt>{_D}+(?:,{_D}+)*(?:\.{_D}+)?)(?P<ssp>[ \t]*)
+        (?P<suf>रुपैयाँ|रुपैया|rupees?)(?![\u0901-\u0939\u093e-\u094fA-Za-z]))
     | (?P<iso>(?<!{_D})(?P<iy>{_D}{{4}})-(?P<im>{_D}{{2}})-(?P<id>{_D}{{2}})(?!{_D}))
     | (?P<dmon>(?<!{_D})(?P<dd>{_D}{{1,2}})(?:st|nd|rd|th)?\s+(?P<dm>{_MONTH_RE})\b
         (?:\s+(?P<dy>{_D}{{4}})(?!{_D}))?)
@@ -210,7 +216,23 @@ def _currency(m: re.Match, nepali: bool) -> str | None:
     return None if n is None else f"{number_words(n)} रुपैयाँ"
 
 
-def _date(day: str, month: int, year: str | None) -> str | None:
+def _suffix_currency(s: str, m: re.Match, nepali: bool) -> str | None:
+    """'<number> रुपैयाँ': the rupee word AFTER the number marks it as an amount (so a long run of
+    digits is an amount, not a phone number). The suffix is kept as written."""
+    head, _, decimals = m.group("samt").partition(".")
+    if decimals and (decimals.translate(_TO_ASCII).strip("0") != "" or len(decimals) > 2):
+        return None  # a real fractional amount: ambiguous, leave it
+    if not nepali:
+        # English: digits are left to the TTS; only a trailing .0/.00 is cleaned
+        return head + m.group("ssp") + m.group("suf") if decimals else None
+    before = s[m.start() - 1] if m.start() > 0 else " "
+    n = _digits_to_int(head)
+    if before not in _OK_BEFORE or n is None:
+        return None
+    return f"{number_words(n)} {m.group('suf')}"
+
+
+def _date(day: str, month: int, year: str | None, current_year: int | None) -> str | None:
     d = int(day.translate(_TO_ASCII))
     if not 1 <= d <= _DAYS_IN_MONTH[month - 1]:
         return None
@@ -219,19 +241,26 @@ def _date(day: str, month: int, year: str | None) -> str | None:
         y = _digits_to_int(year)
         if y is None or not 1900 <= y <= 2199:
             return None
-        out += f", {number_words(y)}"  # kept: dropping the year would lose information
+        if y != current_year:
+            # Kept unless it is the current year: a near-term date read back with its year is
+            # just longer, but a different year must never be lost.
+            out += f", {number_words(y)}"
     return out
 
 
-def _replace(s: str, m: re.Match, nepali: bool) -> tuple[str, str] | tuple[None, str]:
+def _replace(
+    s: str, m: re.Match, nepali: bool, current_year: int | None
+) -> tuple[str, str] | tuple[None, str]:
     """(replacement, class) or (None, class) when the match must pass through unchanged."""
     kind = "num"
-    for name in ("cur", "iso", "dmon", "mond", "time", "phone", "num"):
+    for name in ("cur", "curs", "iso", "dmon", "mond", "time", "phone", "num"):
         if m.group(name) is not None:
             kind = name
             break
     if kind == "cur":
         return _currency(m, nepali), "currency"
+    if kind == "curs":
+        return _suffix_currency(s, m, nepali), "currency"
     if kind == "phone":
         raw = m.group("phone")
         ph = _phone_words(raw, nepali)
@@ -252,11 +281,13 @@ def _replace(s: str, m: re.Match, nepali: bool) -> tuple[str, str] | tuple[None,
         mo = int(m.group("im").translate(_TO_ASCII))
         if not 1 <= mo <= 12:
             return None, "date"
-        return _date(m.group("id"), mo, m.group("iy")), "date"
+        return _date(m.group("id"), mo, m.group("iy"), current_year), "date"
     if kind == "dmon":
-        return _date(m.group("dd"), _MONTH_NUM[m.group("dm").lower()], m.group("dy")), "date"
+        month = _MONTH_NUM[m.group("dm").lower()]
+        return _date(m.group("dd"), month, m.group("dy"), current_year), "date"
     if kind == "mond":
-        return _date(m.group("md"), _MONTH_NUM[m.group("mm").lower()], m.group("my")), "date"
+        month = _MONTH_NUM[m.group("mm").lower()]
+        return _date(m.group("md"), month, m.group("my"), current_year), "date"
     if kind == "time":
         h, mi = int(m.group("th").translate(_TO_ASCII)), int(m.group("tm").translate(_TO_ASCII))
         ap = m.group("ap")
@@ -277,12 +308,12 @@ def _replace(s: str, m: re.Match, nepali: bool) -> tuple[str, str] | tuple[None,
     return (None if n is None else number_words(n)), "number"
 
 
-def _convert_sentence(s: str, result: SpeechResult) -> str:
+def _convert_sentence(s: str, result: SpeechResult, current_year: int | None) -> str:
     nepali = _DEVANAGARI.search(s) is not None
     out: list[str] = []
     pos = 0
     for m in _TOKEN.finditer(s):
-        replacement, kind = _replace(s, m, nepali)
+        replacement, kind = _replace(s, m, nepali, current_year)
         if replacement is None:
             if nepali or kind == "phone":
                 result.passthrough[kind] = result.passthrough.get(kind, 0) + 1
@@ -296,13 +327,15 @@ def _convert_sentence(s: str, result: SpeechResult) -> str:
     return "".join(out)
 
 
-def verbalize(text: str) -> SpeechResult:
+def verbalize(text: str, *, current_year: int | None = None) -> SpeechResult:
     """Rewrites numbers in `text` as spoken words. Never raises: on any internal error the
-    original text is returned untouched (a channel guard must not be able to break a turn)."""
+    original text is returned untouched (a channel guard must not be able to break a turn).
+    `current_year` (in the tenant's timezone) lets a date in the current year be read without it;
+    when unknown, every year is kept."""
     result = SpeechResult(text)
     try:
         parts = _SENTENCE_SPLIT.split(text)
-        result.text = "".join(_convert_sentence(part, result) for part in parts)
+        result.text = "".join(_convert_sentence(part, result, current_year) for part in parts)
     except Exception:  # pragma: no cover - defensive
         logger.exception("number speech failed; returning the text unchanged")
         return SpeechResult(text)

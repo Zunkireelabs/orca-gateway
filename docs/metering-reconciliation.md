@@ -184,5 +184,9 @@ amount. Both digit scripts. Ambiguous input (ranges, percentages, decimals, nega
 zeros, invalid dates or times, numbers glued to letters) passes through unchanged and is counted by
 class at DEBUG, never logged as text. The per-turn log line carries counts only.
 
-Known edges, by design: a bare run of 7 or more digits is read as a phone number (a rupee marker
-makes it an amount); a real decimal, a percentage or another currency is left alone.
+Amounts: a rupee marker before the number (रु, Rs, NPR) or the rupee word after it (रुपैयाँ,
+रुपैया, rupees) makes it an amount. Dates: a date in the current year (tenant timezone) is read
+without the year; any other year is spoken.
+
+Known edges, by design: a bare run of 7 or more digits with no rupee marker is read as a phone
+number; a real decimal, a percentage or another currency is left alone.
