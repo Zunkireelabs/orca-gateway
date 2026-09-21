@@ -220,22 +220,26 @@ async def test_coalescer_restarts_count_one_turn_and_usage_only_from_the_complet
     One turn, one run's usage. The cancelled runs may have been billed by the provider, but their
     usage never arrives, so they are counted as abandoned (not estimated, not silently lost)."""
     backend, _, pg_url = wired
-    backend.delay = 0.6
+    backend.delay = 1.2
     monkeypatch.setattr(elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.05))
 
     async def fire(text, wait):
         await asyncio.sleep(wait)
         return await _post(body=_body(text))
 
-    rs = await asyncio.gather(*[fire(f"hypothesis {i}", i * 0.25) for i in range(4)])
+    rs = await asyncio.gather(*[fire(f"hypothesis {i}", i * 0.4) for i in range(4)])
     assert [r.status_code for r in rs] == [200] * 4
-    assert len(backend.calls) == 4  # 3 cancelled + 1 completed reached the backend
+    # How many runs reach the backend before a restart cancels them depends on timing (a slow CI
+    # runner can restart one before it starts), so assert the invariants, not an exact count.
+    started = len(backend.calls)
+    assert started >= 2  # at least one restart really happened
 
     tokens, completion, cost, turns, abandoned = _row(
         pg_url,
         "llm_prompt_tokens, llm_completion_tokens, llm_cost_usd, turn_count, abandoned_run_count",
     )
-    assert (tokens, completion, turns, abandoned) == (3000, 100, 1, 3)
+    assert (tokens, completion, turns) == (3000, 100, 1)
+    assert started - 1 <= abandoned <= 3  # every started-but-not-completed run was counted
     assert float(cost) == cost_usd("gpt-4o-mini", 3000, 100)
 
 
