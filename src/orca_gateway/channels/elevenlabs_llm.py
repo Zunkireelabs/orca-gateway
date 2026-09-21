@@ -217,10 +217,41 @@ async def chat_completions(request: Request):
             ),
         )
 
-    async def complete(usage: dict | None) -> None:
+    def _turn_summary() -> tuple[int | None, dict | None]:
+        """(latency_ms, coalescer summary) for this depth: first arrival -> now, and how the
+        requests for it were handled. From the coalescer's own tally, so it matches the arrival
+        log lines; requests that arrive after completion are not in it."""
+        summary = get_coalescer().summary(conversation_id, depth)
+        if summary is None:
+            return int((time.monotonic() - arrived) * 1000), None
+        first = summary.pop("first_arrival", arrived)
+        return int((time.monotonic() - first) * 1000), summary
+
+    async def complete(
+        *,
+        usage: dict | None,
+        user_text: str,
+        answer: str | None,
+        tools: list[dict] | None = None,
+        ended_by: str | None = None,
+        coalescer: dict | None = None,
+    ) -> None:
+        # The single call that counts a turn AND writes its transcript row (same transaction,
+        # unique on (call, depth)): there is deliberately no second path that could double-count.
+        latency_ms, summary = _turn_summary()
         await _metering(
             "complete_turn",
-            lambda: metering.complete_turn(conversation_id=conversation_id, usage=usage),
+            lambda: metering.complete_turn(
+                conversation_id=conversation_id,
+                depth=depth,
+                usage=usage,
+                user_text=user_text,
+                answer_text=answer,
+                tools=tools,
+                latency_ms=latency_ms,
+                coalescer=coalescer if coalescer is not None else summary,
+                ended_by=ended_by,
+            ),
         )
 
     async def abandon() -> None:
@@ -255,6 +286,9 @@ async def chat_completions(request: Request):
                     slug,
                     conversation_id,
                 )
+                await complete(
+                    usage=None, user_text=text, answer=None, ended_by="daily_spend_cap"
+                )
                 raise DailySpendCapExceeded()
             if existing_call is None and ch.daily_spend_cap is not None:
                 try:
@@ -280,6 +314,9 @@ async def chat_completions(request: Request):
                             elevenlabs_agent_id=ch.elevenlabs_agent_id,
                         ),
                     )
+                    await complete(
+                        usage=None, user_text=text, answer=None, ended_by="daily_spend_cap"
+                    )
                     raise DailySpendCapExceeded()
 
         if existing_call is not None and ch.max_session_seconds is not None:
@@ -298,13 +335,17 @@ async def chat_completions(request: Request):
                 await _metering(
                     "close_call", lambda: metering.close_call(conversation_id, "max_session")
                 )
-                text = _SESSION_LIMIT_MESSAGE.replace("{brand}", ch.spoken_brand_name)
-                return TurnResult(answer=text, usage=None)
+                limit_text = _SESSION_LIMIT_MESSAGE.replace("{brand}", ch.spoken_brand_name)
+                await complete(
+                    usage=None, user_text=text, answer=limit_text, ended_by="max_session"
+                )
+                return TurnResult(answer=limit_text, usage=None)
 
         await touch()
         answer_tokens: list[str] = []
         answer: str | None = None
         usage: dict | None = None
+        tools: list[dict] = []  # opaque {name, status} strings; the gateway never interprets them
         completed = False
         try:
             async for event in backend.session(
@@ -321,6 +362,10 @@ async def chat_completions(request: Request):
                     answer = event.data.get("answer", "")
                 elif event.type == "usage":
                     usage = event.data
+                elif event.type == "tool":
+                    tools.append(
+                        {"name": event.data.get("name", ""), "status": event.data.get("status", "")}
+                    )
                 elif event.type == "error":
                     raise UpstreamError(event.data.get("message", ""))
             text_out = answer if answer is not None else "".join(answer_tokens)
@@ -330,7 +375,7 @@ async def chat_completions(request: Request):
         finally:
             if not completed:
                 await abandon()
-        await complete(usage)
+        await complete(usage=usage, user_text=text, answer=text_out, tools=tools)
         return TurnResult(answer=text_out, usage=usage)
 
     available = availability(cfg, ch, deps.now())
@@ -340,10 +385,16 @@ async def chat_completions(request: Request):
         # coalesced (pre-dates S5): a duplicate raw request here records more than one turn, an
         # acceptable, low-stakes inaccuracy since no backend cost is ever attached to this path.
         log_arrival("not_coalesced")
+        closed_text = (ch.out_of_hours_message or "").replace("{brand}", ch.spoken_brand_name)
         await touch()
-        await complete(None)
-        text = (ch.out_of_hours_message or "").replace("{brand}", ch.spoken_brand_name)
-        result = TurnResult(answer=text, usage=None)
+        await complete(
+            usage=None,
+            user_text=turn,
+            answer=closed_text,
+            ended_by="out_of_hours",
+            coalescer={"requests": 1, "not_coalesced": 1},
+        )
+        result = TurnResult(answer=closed_text, usage=None)
     else:
         try:
             result = await get_coalescer().submit(

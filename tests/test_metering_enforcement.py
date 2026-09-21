@@ -48,6 +48,7 @@ class _Backend:
     ) -> AsyncIterator[TurnEvent]:
         self.calls.append(conversation_id)
         await asyncio.sleep(self.delay)
+        yield TurnEvent(type="tool", data={"name": "lookup", "status": "done"})
         yield TurnEvent(type="done", data={"answer": f"final:{turn}", "sources": []})
         yield TurnEvent(type="usage", data=dict(USAGE))
 
@@ -316,3 +317,95 @@ async def test_daily_spend_cap_trip_is_logged_recorded_and_keeps_refusing(wired,
     # The refusal is sticky for that call: a retry must not slip through because a row now exists.
     assert (await _post(body=_deeper(_body("retry")))).status_code == 403
     assert backend.calls == []
+
+
+def _turns(pg_url):
+    with psycopg.connect(pg_url) as conn:
+        return conn.execute(
+            "select t.depth, t.user_text, t.answer_text, t.tools, t.usage, t.latency_ms, "
+            "       t.coalescer, t.ended_by "
+            "from orca_gw.turns t join orca_gw.calls c on c.id = t.call_id "
+            "where c.conversation_id = %s order by t.depth",
+            (TRACE,),
+        ).fetchall()
+
+
+async def test_a_fan_out_records_one_transcript_row_whose_summary_matches_the_arrival_log(
+    wired, caplog, monkeypatch
+):
+    backend, _, pg_url = wired
+    backend.delay = 0.3
+    monkeypatch.setattr(elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.05))
+    with caplog.at_level(logging.INFO, logger="orca_gateway.channels.elevenlabs_llm"):
+        rs = await asyncio.gather(*[_post(body=_body("what are your hours")) for _ in range(5)])
+    assert [r.status_code for r in rs] == [200] * 5
+
+    [(depth, user, answer, tools, usage, latency, coalescer, ended_by)] = _turns(pg_url)
+    assert (depth, user, answer) == (3, "what are your hours", "final:what are your hours")
+    assert tools == [{"name": "lookup", "status": "done"}]  # opaque strings, passed through
+    assert usage["prompt_tokens"] == 3000 and ended_by is None
+    assert latency is not None and latency >= 250  # first arrival -> answer, includes the run
+    logged = [m for m in caplog.messages if m.startswith("voice request arrival ")]
+    assert coalescer["requests"] == len(logged) == 5
+    for decision in ("started", "joined"):
+        assert coalescer[decision] == sum(f"decision={decision}" in m for m in logged)
+    # the turn is still counted exactly once
+    assert _row(pg_url, "turn_count, llm_prompt_tokens") == (1, 3000)
+
+
+async def test_transcript_text_never_reaches_the_logs(wired, caplog):
+    secret = "my number is 9800000000 and I am Gita"
+    with caplog.at_level(logging.DEBUG):
+        assert (await _post(body=_body(secret))).status_code == 200
+    assert "9800000000" not in caplog.text and "Gita" not in caplog.text
+    assert _turns(wired[2])[0][1] == secret  # ...but it IS stored, which is what the purge is for
+
+
+async def test_gateway_answered_turns_are_marked_not_left_looking_like_the_agent(wired):
+    backend, tenant_cfg, pg_url = wired
+    tenant_cfg.channels["voice"].max_session_seconds = 60
+    assert (await _post(body=_body("hi"))).status_code == 200
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute(
+            "update orca_gw.calls set started_at = %s where conversation_id = %s",
+            (datetime.now(UTC) - timedelta(seconds=120), TRACE),
+        )
+    assert (await _post(body=_deeper(_body("more")))).status_code == 200
+    rows = _turns(pg_url)
+    assert [(r[0], r[7]) for r in rows] == [(3, None), (5, "max_session")]
+    assert "time limit" in rows[1][2]
+    assert _row(pg_url, "turn_count")[0] == 1  # the tripped turn is not a served turn
+
+
+async def test_out_of_hours_and_cap_refusals_are_recorded_with_their_marker(wired):
+    backend, tenant_cfg, pg_url = wired
+    ch = tenant_cfg.channels["voice"]
+    ch.out_of_hours_behaviour = "say_closed"
+    ch.out_of_hours_message = "We are closed. Goodbye from {brand}."
+    ch.closed_weekdays = [0, 1, 2, 3, 4, 5, 6]
+    assert (await _post(body=_body("are you open"))).status_code == 200
+    assert backend.calls == []
+    [row] = _turns(pg_url)
+    assert row[7] == "out_of_hours" and "closed" in row[2] and row[6] == {
+        "requests": 1,
+        "not_coalesced": 1,
+    }
+
+
+async def test_a_cap_refusal_records_a_turn_with_no_answer(wired):
+    backend, tenant_cfg, pg_url = wired
+    tenant_cfg.channels["voice"].daily_spend_cap = 1.00
+    with psycopg.connect(pg_url) as conn:
+        tenant_id = conn.execute(
+            "select id from orca_gw.tenants where slug='dental-city'"
+        ).fetchone()[0]
+        conn.execute(
+            "insert into orca_gw.tenant_daily_spend "
+            "(tenant_id, spend_date, llm_cost_usd, call_count) "
+            "values (%s, (now() at time zone 'utc')::date, 5.00, 3)",
+            (tenant_id,),
+        )
+        conn.commit()
+    assert (await _post(body=_body("hi"))).status_code == 403
+    [row] = _turns(pg_url)
+    assert (row[0], row[1], row[2], row[7]) == (3, "hi", None, "daily_spend_cap")

@@ -16,7 +16,9 @@ from orca_gateway.calls_repo import PgCallsRepository
 logger = logging.getLogger("orca_gateway.sweep")
 
 
-async def run_forever(repo: PgCallsRepository, *, idle_s: float, interval_s: float) -> None:
+async def run_forever(
+    repo: PgCallsRepository, *, idle_s: float, interval_s: float, retention_days: int = 30
+) -> None:
     """Runs until cancelled. A single sweep failure (e.g. a transient DB blip) is logged and
     retried on the next tick rather than killing the loop -- metering must not be able to take
     the gateway down."""
@@ -25,6 +27,9 @@ async def run_forever(repo: PgCallsRepository, *, idle_s: float, interval_s: flo
             closed = await repo.sweep_idle(idle_s)
             if closed:
                 logger.info("idle-timeout sweep closed %d call(s): %s", len(closed), closed)
+            purged = await repo.purge_turns(retention_days)
+            if purged:
+                logger.info("retention purged %d turn(s) older than %dd", purged, retention_days)
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -146,3 +146,22 @@ cannot know a backend call has no side effect; a write must land or fail, never 
 remaining cancellation is the run timeout (`voice_run_timeout_s`), a safety bound so a hung backend
 cannot hold the slot forever; no request triggers it. Tuning `voice_debounce_ms` is deliberately
 left alone.
+
+## Transcripts (`orca_gw.turns`, S6 PR 1)
+
+One row per COMPLETED turn, written by `complete_turn`, the same transaction that counts the turn
+and adds its usage, unique on `(call_id, depth)`. That key is the guard against the S5 bug: the
+count, the usage and the transcript row are one unit, and a second completion of the same depth is
+a logged no-op, so there is no second write path that can double-count. Columns: `user_text` (the
+text the run actually answered), `answer_text` (null when nothing was spoken), `tools`
+(`[{name, status}]`, opaque strings from the seam's tool events), `usage` (the payload as
+reported), `latency_ms` (first arrival to answer), `coalescer` (the per-depth tally of
+started/restarted/joined/joined_late/stale requests, the same decisions the arrival log prints;
+requests that arrive after the turn completed are in the log but not in the tally), and
+`ended_by` (`out_of_hours`, `max_session`, `daily_spend_cap` when the gateway answered without the
+backend).
+
+The text columns are PII. They are never logged (a test asserts it) and are purged by the idle sweep
+after `ORCA_METERING_TURN_RETENTION_DAYS` (default 30); calls, costs and `call_labels` are kept.
+No audio is stored. `call_labels` and `config_audit` are created here for the console (PR 2); nothing
+writes them yet. Turns from before this change do not exist and cannot be backfilled.

@@ -259,3 +259,25 @@ async def test_a_failing_on_decision_callback_cannot_change_the_outcome():
         raise RuntimeError("logging blew up")
 
     assert await coalescer.submit("c", 1, "hi", work, not_gone, on_decision=boom) == "done:hi"
+
+
+async def test_summary_tallies_how_each_depths_requests_were_handled():
+    c, w = TurnCoalescer(debounce_s=0.2), _Work(delay=0.3)
+    tasks = [
+        asyncio.create_task(c.submit("t", 5, "a", w, _never_gone)),  # started
+        asyncio.create_task(c.submit("t", 5, "b", w, _never_gone)),  # restarted (in debounce)
+        asyncio.create_task(c.submit("t", 5, "b", w, _never_gone)),  # joined (same text)
+    ]
+    await asyncio.sleep(0.3)  # the run is committed now
+    tasks.append(asyncio.create_task(c.submit("t", 5, "c", w, _never_gone)))  # joined_late
+    await asyncio.gather(*tasks)
+    s = c.summary("t", 5)
+    first = s.pop("first_arrival")
+    assert isinstance(first, float)
+    assert s == {"requests": 4, "started": 1, "restarted": 1, "joined": 1, "joined_late": 1}
+    assert c.summary("t", 99) is None and c.summary("nope", 5) is None
+    # a stale request is tallied against ITS depth
+    await c.submit("t", 7, "z", w, _never_gone)
+    with pytest.raises(StaleTurnError):
+        await c.submit("t", 5, "late", w, _never_gone)
+    assert c.summary("t", 5)["stale"] == 1
