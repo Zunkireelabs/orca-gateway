@@ -41,28 +41,81 @@ async def test_variants_at_same_depth_share_one_run_and_newest_wins():
     assert w.started == ["d"]  # debounce meant the superseded variants never reached the backend
 
 
-async def test_restart_after_backend_started_serializes_and_cancels_old_run():
+def _decisions():
+    seen: list[str] = []
+    return seen, seen.append
+
+
+async def test_different_text_after_the_backend_started_joins_and_never_cancels():
+    """POLICY REVERSED from S1 (which restarted and cancelled the in-flight run): once work() has
+    started, a newer hypothesis JOINS it. The backend runs once, on the first text it saw."""
     c, w = TurnCoalescer(debounce_s=0.0), _Work(delay=0.3)
-    first = asyncio.create_task(c.submit("t", 5, "a", w, _never_gone))
+    seen, on = _decisions()
+    first = asyncio.create_task(c.submit("t", 5, "a", w, _never_gone, on_decision=on))
     await asyncio.sleep(0.1)  # 'a' is now in flight against the backend
-    second = asyncio.create_task(c.submit("t", 5, "b", w, _never_gone))
+    second = asyncio.create_task(c.submit("t", 5, "b", w, _never_gone, on_decision=on))
+    assert await first == await second == "answer:a"
+    assert w.started == ["a"] and w.cancelled == [] and w.max_inflight == 1
+    assert seen == ["started", "joined_late"]
+
+
+async def test_different_text_inside_the_debounce_window_restarts_for_free():
+    c, w = TurnCoalescer(debounce_s=0.2), _Work(delay=0.05)
+    seen, on = _decisions()
+    first = asyncio.create_task(c.submit("t", 5, "a", w, _never_gone, on_decision=on))
+    await asyncio.sleep(0.05)  # still inside the debounce: nothing has reached the backend
+    second = asyncio.create_task(c.submit("t", 5, "b", w, _never_gone, on_decision=on))
     assert await first == await second == "answer:b"
-    assert w.cancelled == ["a"]
-    assert w.max_inflight == 1  # never two backend calls at once for one conversation
+    assert w.started == ["b"] and w.cancelled == []  # the superseded text never ran at all
+    assert seen == ["started", "restarted"]
 
 
-async def test_all_waiters_gone_aborts_backend_run():
-    c, w = TurnCoalescer(debounce_s=0.0), _Work(delay=1.0)
+async def test_slow_backend_and_alternating_hypotheses_make_exactly_one_backend_call():
+    """The shape of the live failure (26 requests over 30s, 12 restarts): a slow backend while
+    the platform keeps alternating two hypotheses and re-sending. One call, none cancelled."""
+    c, w = TurnCoalescer(debounce_s=0.05), _Work(delay=2.0)
+    seen, on = _decisions()
+
+    async def fire(i):
+        await asyncio.sleep(0.1 + i * 0.08)  # all after the debounce, spread over the run
+        return await c.submit("t", 5, ("hyp-a", "hyp-b")[i % 2], w, _never_gone, on_decision=on)
+
+    results = await asyncio.gather(*[fire(i) for i in range(20)])
+    assert results == ["answer:hyp-a"] * 20
+    assert w.started == ["hyp-a"] and w.cancelled == [] and w.finished == ["hyp-a"]
+    assert seen.count("started") == 1 and seen.count("restarted") == 0
+    assert seen.count("joined_late") == 10 and seen.count("joined") == 9
+
+
+async def test_all_waiters_gone_before_the_backend_is_called_aborts_for_free():
+    c, w = TurnCoalescer(debounce_s=1.0), _Work(delay=1.0)
 
     async def gone_after():
         await asyncio.sleep(0.15)
         return True
 
-    task = asyncio.create_task(c.submit("t", 3, "a", w, gone_after))
     with pytest.raises(ClientGoneError):
-        await task
+        await c.submit("t", 3, "a", w, gone_after)
     await asyncio.sleep(0.05)
-    assert w.cancelled == ["a"] and w.finished == []
+    assert w.started == []  # never reached the backend, so nothing to finish or undo
+
+
+async def test_all_waiters_gone_after_the_backend_started_lets_the_run_finish():
+    """DECISION: a committed run is never abandoned, even when every caller disconnects. A backend
+    call may have a side effect the gateway cannot see, and a write must land or fail, never
+    half-land. The answer stays cached, so a retry at the same depth gets it without a rerun."""
+    c, w = TurnCoalescer(debounce_s=0.0), _Work(delay=0.5)
+
+    async def gone_after():
+        await asyncio.sleep(0.15)
+        return True
+
+    with pytest.raises(ClientGoneError):
+        await c.submit("t", 3, "a", w, gone_after)
+    await asyncio.sleep(0.6)
+    assert w.started == ["a"] and w.finished == ["a"] and w.cancelled == []
+    assert await c.submit("t", 3, "a", w, _never_gone) == "answer:a"  # cached, not rerun
+    assert w.started == ["a"]
 
 
 async def test_one_disconnect_does_not_abort_while_another_waits():
@@ -80,16 +133,50 @@ async def test_one_disconnect_does_not_abort_while_another_waits():
     assert w.started == ["a"] and w.cancelled == []
 
 
-async def test_newer_depth_supersedes_older_and_older_is_stale_afterwards():
+async def test_newer_depth_does_not_cancel_a_committed_older_run():
+    """POLICY CHANGED from S1: the older run had reached the backend, so it finishes (its callers
+    are told the turn is stale) and the newer depth's run waits for it, one at a time."""
     c, w = TurnCoalescer(debounce_s=0.0), _Work(delay=0.3)
     old = asyncio.create_task(c.submit("t", 3, "old", w, _never_gone))
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.1)  # 'old' is committed
     new = asyncio.create_task(c.submit("t", 5, "new", w, _never_gone))
     with pytest.raises(StaleTurnError):
         await old
     assert await new == "answer:new"
+    assert w.finished == ["old", "new"] and w.cancelled == [] and w.max_inflight == 1
     with pytest.raises(StaleTurnError):
         await c.submit("t", 3, "late", w, _never_gone)
+
+
+async def test_newer_depth_still_supersedes_an_older_run_that_has_not_started():
+    c, w = TurnCoalescer(debounce_s=0.5), _Work(delay=0.05)
+    old = asyncio.create_task(c.submit("t", 3, "old", w, _never_gone))
+    await asyncio.sleep(0.05)  # 'old' is still in its debounce
+    new = asyncio.create_task(c.submit("t", 5, "new", w, _never_gone))
+    with pytest.raises(StaleTurnError):
+        await old
+    assert await new == "answer:new"
+    assert w.started == ["new"]
+
+
+async def test_cancelling_a_run_that_waits_for_a_committed_one_does_not_cancel_that_one():
+    """The newer depth's run waits for the committed run. If THAT waiter is itself cancelled
+    (aborted because its callers left), the committed run must be unaffected."""
+    c, w = TurnCoalescer(debounce_s=0.0), _Work(delay=0.4)
+    old = asyncio.create_task(c.submit("t", 3, "old", w, _never_gone))
+    await asyncio.sleep(0.1)
+
+    async def gone_soon():
+        await asyncio.sleep(0.1)
+        return True
+
+    new = asyncio.create_task(c.submit("t", 5, "new", w, gone_soon))
+    with pytest.raises(ClientGoneError):
+        await new
+    with pytest.raises(StaleTurnError):
+        await old  # its caller is told stale by the newer depth...
+    await asyncio.sleep(0.4)
+    assert w.finished == ["old"] and w.cancelled == []  # ...but the run itself completed
 
 
 async def test_straggler_after_completion_returns_cached_answer_not_a_rerun():

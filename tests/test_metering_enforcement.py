@@ -213,12 +213,12 @@ async def test_fan_out_duplicates_count_tokens_cost_turn_and_spend_exactly_once(
     assert await PgCallsRepository(pg_url).daily_spend_usd("dental-city") == expected
 
 
-async def test_coalescer_restarts_count_one_turn_and_usage_only_from_the_completed_run(
+async def test_slow_backend_with_alternating_hypotheses_is_one_call_and_no_abandoned_runs(
     wired, monkeypatch
 ):
-    """Four speech hypotheses for one turn: three runs are cancelled mid-flight, one completes.
-    One turn, one run's usage. The cancelled runs may have been billed by the provider, but their
-    usage never arrives, so they are counted as abandoned (not estimated, not silently lost)."""
+    """The live failure shape (a slow turn while the platform alternates hypotheses): with the
+    commit rule there is exactly one backend call, one turn, one run's usage, and nothing was
+    abandoned. (Before the rule, every flip cancelled a paid run: 16 abandoned in one call.)"""
     backend, _, pg_url = wired
     backend.delay = 1.2
     monkeypatch.setattr(elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.05))
@@ -227,20 +227,30 @@ async def test_coalescer_restarts_count_one_turn_and_usage_only_from_the_complet
         await asyncio.sleep(wait)
         return await _post(body=_body(text))
 
-    rs = await asyncio.gather(*[fire(f"hypothesis {i}", i * 0.4) for i in range(4)])
-    assert [r.status_code for r in rs] == [200] * 4
-    # How many runs reach the backend before a restart cancels them depends on timing (a slow CI
-    # runner can restart one before it starts), so assert the invariants, not an exact count.
-    started = len(backend.calls)
-    assert started >= 2  # at least one restart really happened
+    rs = await asyncio.gather(*[fire(f"hypothesis {i % 2}", 0.1 + i * 0.08) for i in range(12)])
+    assert [r.status_code for r in rs] == [200] * 12
+    assert len(backend.calls) == 1
 
     tokens, completion, cost, turns, abandoned = _row(
         pg_url,
         "llm_prompt_tokens, llm_completion_tokens, llm_cost_usd, turn_count, abandoned_run_count",
     )
-    assert (tokens, completion, turns) == (3000, 100, 1)
-    assert started - 1 <= abandoned <= 3  # every started-but-not-completed run was counted
+    assert (tokens, completion, turns, abandoned) == (3000, 100, 1, 0)
     assert float(cost) == cost_usd("gpt-4o-mini", 3000, 100)
+
+
+async def test_a_run_that_fails_is_counted_abandoned_not_silently_lost(wired, monkeypatch):
+    """abandoned_run_count now means real failures (a run that reached the backend and did not
+    complete), no longer coalescer restarts."""
+    backend, _, pg_url = wired
+
+    async def session(**kw):
+        raise ConnectionError("backend down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(backend, "session", session)
+    assert (await _post(body=_body("hi"))).status_code == 502
+    assert _row(pg_url, "turn_count, abandoned_run_count, llm_prompt_tokens") == (0, 1, None)
 
 
 async def test_incomplete_usage_payload_is_not_defaulted_to_zero(wired, monkeypatch):

@@ -229,25 +229,26 @@ async def test_arrival_log_records_each_request_and_the_coalescer_decision(wired
     assert "4111" not in caplog.text and "Sita" not in caplog.text
 
 
-async def test_arrival_log_marks_a_restart_and_a_stale_turn(wired, caplog):
+async def test_arrival_log_marks_restart_joined_late_and_stale(wired, caplog, monkeypatch):
+    monkeypatch.setattr(elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.3))
     wired.delay = 0.4
 
-    async def fire(text, wait, body_extra=None):
+    async def fire(text, wait):
         await asyncio.sleep(wait)
-        body = _body(user=text)
-        if body_extra:
-            body["messages"] += body_extra
-        return await _post(body=body)
+        return await _post(body=_body(user=text))
 
     deeper = [{"role": "assistant", "content": "a"}, {"role": "user", "content": "x"}]
     with caplog.at_level(logging.INFO, logger=ARRIVAL_LOGGER):
         await asyncio.gather(
             fire("first hypothesis", 0.0),
-            fire("second hypothesis", 0.15),  # same depth, different text, run in flight
+            fire("second hypothesis", 0.1),  # inside the 0.3s debounce: a free restart
+            fire("third hypothesis", 0.5),  # after the backend was called: joins, never cancels
         )
         later = _body(user="later")
         later["messages"] += deeper
         await _post(body=later)
         await _post(body=_body(user="older turn"))  # depth 3 after depth 5: superseded
     decisions = [x["decision"] for x in _arrivals(caplog)]
-    assert decisions == ["started", "restarted", "started", "stale"]
+    assert decisions == ["started", "restarted", "joined_late", "started", "stale"]
+    assert len(wired.calls) == 2  # one run per logical turn, never one per hypothesis
+    assert wired.calls[0]["turn"] == "second hypothesis"  # the restart inside the debounce won
