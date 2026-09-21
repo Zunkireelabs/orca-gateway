@@ -13,7 +13,8 @@ is won). Before that, a newer hypothesis for the same turn restarts it (the newe
 depth supersedes it, and it is aborted if every waiter disconnects: nothing has been handed to the
 backend, so nothing can be half-done. After that, NOTHING cancels it because a request arrived:
 - a request at the same depth with different text JOINS the in-flight run and gets its answer
-  (`joined_late`); the first text the backend saw wins;
+  (`joined_late`, or `joined_after_done` once it has finished); the first text the backend
+  saw wins;
 - a newer depth does not cancel it; its own callers are told the turn is stale and it runs to
   completion in the background, and the newer depth's run waits for it;
 - if every waiter disconnects it is STILL left to finish. A backend call may have side effects the
@@ -91,9 +92,10 @@ class TurnCoalescer:
     ):
         """Run (or join) the turn at `depth`. `gone()` reports this caller disconnecting.
         `on_decision`, if given, is told what was decided for THIS request -- "stale", "started",
-        "restarted" (newer text, run not yet committed), "joined" (same text) or "joined_late"
-        (different text, run already committed) -- for observability only; it never changes the
-        outcome."""
+        "restarted" (newer text, run not yet committed), "joined" (same text), "joined_late"
+        (different text, run committed and still running) or "joined_after_done" (different text,
+        run already finished; it gets the cached answer to the earlier text) -- for observability
+        only; it never changes the outcome."""
         self._prune()
         conv = self._convs.setdefault(conversation_id, _Conversation())
         conv.last_seen = time.monotonic()
@@ -141,7 +143,15 @@ class TurnCoalescer:
             entry.task = asyncio.create_task(self._run(conv, depth, entry, work, prev))
         else:
             # Same text, or a run that is already committed (or finished): share its result.
-            decide("joined_late" if entry.text != text and not entry.result.done() else "joined")
+            if entry.text == text:
+                decide("joined")
+            elif entry.result.done():
+                # A different text arriving after the run already answered: it gets the cached
+                # answer to the EARLIER text. Its own label, so the log shows the later text was
+                # never answered (an interim hypothesis answered before the final transcript).
+                decide("joined_after_done")
+            else:
+                decide("joined_late")
 
         entry.waiters += 1
         try:

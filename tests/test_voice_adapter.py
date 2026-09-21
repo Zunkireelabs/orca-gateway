@@ -252,3 +252,17 @@ async def test_arrival_log_marks_restart_joined_late_and_stale(wired, caplog, mo
     assert decisions == ["started", "restarted", "joined_late", "started", "stale"]
     assert len(wired.calls) == 2  # one run per logical turn, never one per hypothesis
     assert wired.calls[0]["turn"] == "second hypothesis"  # the restart inside the debounce won
+
+
+async def test_arrival_log_marks_a_different_text_after_the_answer_as_joined_after_done(
+    wired, caplog
+):
+    with caplog.at_level(logging.INFO, logger=ARRIVAL_LOGGER):
+        assert (await _post(body=_body(user="garbled interim"))).status_code == 200
+        r = await _post(body=_body(user="the clear final transcript"))
+    assert r.status_code == 200
+    assert [x["decision"] for x in _arrivals(caplog)] == ["started", "joined_after_done"]
+    assert len(wired.calls) == 1 and wired.calls[0]["turn"] == "garbled interim"
+    # both texts appear only as hashes, and they differ
+    hashes = [x["text_sha"] for x in _arrivals(caplog)]
+    assert hashes[0] != hashes[1] and "clear final" not in caplog.text
