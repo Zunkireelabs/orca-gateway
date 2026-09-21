@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+import logging
 from collections.abc import AsyncIterator
 
 import httpx
@@ -194,3 +196,58 @@ async def test_no_database_configured_fails_closed_with_503_not_a_traceback(wire
     r = await _post()
     assert r.status_code == 503 and "Traceback" not in r.text
     deps.get_tenant_store.cache_clear()
+
+
+ARRIVAL_LOGGER = "orca_gateway.channels.elevenlabs_llm"
+
+
+def _arrivals(caplog) -> list[dict]:
+    """Parse the per-request arrival log lines into dicts."""
+    out = []
+    for m in caplog.messages:
+        if m.startswith("voice request arrival "):
+            out.append(dict(p.split("=", 1) for p in m.split()[3:]))
+    return out
+
+
+async def test_arrival_log_records_each_request_and_the_coalescer_decision(wired, caplog):
+    secret_text = "my card number is 4111 and my name is Sita"
+    wired.delay = 0.3
+    with caplog.at_level(logging.INFO, logger=ARRIVAL_LOGGER):
+        rs = await asyncio.gather(*[_post(body=_body(user=secret_text)) for _ in range(3)])
+    assert [r.status_code for r in rs] == [200] * 3
+
+    lines = _arrivals(caplog)
+    assert sorted(x["decision"] for x in lines) == ["joined", "joined", "started"]
+    for x in lines:
+        assert x["conversation"] == TRACE
+        assert x["depth"] == "3"
+        assert x["text_sha"] == hashlib.sha256(secret_text.encode()).hexdigest()[:12]
+        assert x["span"] == "8a2e73c1d4f50b96"
+        float(x["arrived_mono"])  # a monotonic timestamp, parseable
+    # The text itself is caller data and must never be logged.
+    assert "4111" not in caplog.text and "Sita" not in caplog.text
+
+
+async def test_arrival_log_marks_a_restart_and_a_stale_turn(wired, caplog):
+    wired.delay = 0.4
+
+    async def fire(text, wait, body_extra=None):
+        await asyncio.sleep(wait)
+        body = _body(user=text)
+        if body_extra:
+            body["messages"] += body_extra
+        return await _post(body=body)
+
+    deeper = [{"role": "assistant", "content": "a"}, {"role": "user", "content": "x"}]
+    with caplog.at_level(logging.INFO, logger=ARRIVAL_LOGGER):
+        await asyncio.gather(
+            fire("first hypothesis", 0.0),
+            fire("second hypothesis", 0.15),  # same depth, different text, run in flight
+        )
+        later = _body(user="later")
+        later["messages"] += deeper
+        await _post(body=later)
+        await _post(body=_body(user="older turn"))  # depth 3 after depth 5: superseded
+    decisions = [x["decision"] for x in _arrivals(caplog)]
+    assert decisions == ["started", "restarted", "started", "stale"]

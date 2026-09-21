@@ -12,6 +12,15 @@ from orca_gateway.channels import elevenlabs_llm
 from orca_gateway.config import get_settings
 from orca_gateway.tenants import TenantStoreError
 
+# uvicorn configures only its own loggers, so without a handler here every INFO line from this
+# package (the per-request arrival log, the idle sweep) is silently dropped.
+_pkg_logger = logging.getLogger("orca_gateway")
+if not _pkg_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    _pkg_logger.addHandler(_handler)
+    _pkg_logger.setLevel(logging.INFO)
+
 logger = logging.getLogger("orca_gateway.main")
 
 

@@ -109,6 +109,21 @@ as a webhook this cycle). Decided and implemented:
   cap=..`, and an already-closed row with `ended_reason = 'daily_spend_cap'` and zero turns is
   written (not counted in `tenant_daily_spend`). Retries of that conversation keep being refused.
 
+## Per-request arrival log
+
+Every `/chat/completions` request logs one INFO line at arrival (the uvicorn access line is written
+at response time, so it says nothing about when a request arrived):
+
+    voice request arrival conversation=<trace-id> depth=<len(messages)> text_sha=<sha256[:12]>
+    span=<traceparent span id> arrived_mono=<monotonic seconds> decision=<...>
+
+`decision` is what the coalescer did with THIS request: `started` (new run), `restarted` (a newer
+text for the same turn cancelled the in-flight run), `joined` (shares an existing run's result),
+`stale` (the conversation already moved past this depth), or `not_coalesced` (answered without the
+backend). Only a hash of the text is logged, never the text: a turn can contain caller PII. Logging
+only, no behaviour change. The package logger now has its own handler; before this, every INFO line
+from `orca_gateway` (including the idle-sweep line) was silently dropped in the container.
+
 ## `per_caller_rate_limit`
 
 Stored, not enforced — no telephony, no caller ID, no phone number exists at the gateway today, so

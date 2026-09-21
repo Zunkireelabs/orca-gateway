@@ -65,12 +65,25 @@ class TurnCoalescer:
         text: str,
         work: Callable[[str], Awaitable],
         gone: Callable[[], Awaitable[bool]],
+        on_decision: Callable[[str], None] | None = None,
     ):
-        """Run (or join) the turn at `depth`. `gone()` reports this caller disconnecting."""
+        """Run (or join) the turn at `depth`. `gone()` reports this caller disconnecting.
+        `on_decision`, if given, is told what was decided for THIS request -- "stale", "started",
+        "restarted" or "joined" -- for observability only; it never changes the outcome."""
         self._prune()
+
+        def decide(decision: str) -> None:
+            if on_decision is None:
+                return
+            try:
+                on_decision(decision)
+            except Exception:  # observability must never change what the coalescer does
+                pass
+
         conv = self._convs.setdefault(conversation_id, _Conversation())
         conv.last_seen = time.monotonic()
         if depth < conv.max_depth:
+            decide("stale")
             raise StaleTurnError(depth)
         if depth > conv.max_depth:
             for old_depth, old in list(conv.entries.items()):
@@ -80,16 +93,20 @@ class TurnCoalescer:
 
         entry = conv.entries.get(depth)
         if entry is None:
+            decide("started")
             entry = conv.entries[depth] = _Entry(text=text)
             entry.task = asyncio.create_task(self._run(conv, depth, entry, work, None))
         elif not entry.result.done() and entry.text != text:
             # Newer hypothesis for the same turn: restart, after the old run has fully stopped
             # so at most one backend call per conversation is ever in flight.
+            decide("restarted")
             prev = entry.task
             if prev is not None:
                 prev.cancel()
             entry.text = text
             entry.task = asyncio.create_task(self._run(conv, depth, entry, work, prev))
+        else:
+            decide("joined")
 
         entry.waiters += 1
         try:

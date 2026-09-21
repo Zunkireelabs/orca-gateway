@@ -15,6 +15,7 @@ before any audio starts, never a half-spoken sentence.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -41,7 +42,7 @@ from orca_gateway.tenants import (
 router = APIRouter()
 
 _SLUG = re.compile(SLUG_PATTERN)
-_TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$")
+_TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$")
 # max_session_seconds exceeded (S5 brief §3.4): a call-center-generic message, not tenant-authored
 # like out_of_hours_message, since there is nothing product-specific about a session time limit.
 _SESSION_LIMIT_MESSAGE = (
@@ -99,6 +100,11 @@ def _conversation_id(request: Request) -> str:
     return match.group(1)
 
 
+def _span_id(request: Request) -> str:
+    match = _TRACEPARENT.match(request.headers.get("traceparent", ""))
+    return match.group(2) if match else "-"
+
+
 def _tenant_slug(request: Request) -> str:
     """Which tenant this request is for. Set per agent in the platform's "Request headers".
     There is NO default tenant: a missing or malformed header is a client error, never a guess."""
@@ -133,6 +139,7 @@ def _chunk(completion_id: str, model: str, **choice) -> str:
 
 @router.post("/chat/completions")
 async def chat_completions(request: Request):
+    arrived = time.monotonic()  # taken first: the uvicorn access line is written at RESPONSE time
     _authorize(request)
     conversation_id = _conversation_id(request)
     body = await request.json()
@@ -144,6 +151,20 @@ async def chat_completions(request: Request):
 
     slug = _tenant_slug(request)
     log = logging.getLogger("orca_gateway.channels.elevenlabs_llm")
+
+    def log_arrival(decision: str) -> None:
+        # Observability only. The hash, never the text: a turn can contain caller PII.
+        log.info(
+            "voice request arrival conversation=%s depth=%d text_sha=%s span=%s "
+            "arrived_mono=%.3f decision=%s",
+            conversation_id,
+            depth,
+            hashlib.sha256(turn.encode()).hexdigest()[:12],
+            _span_id(request),
+            arrived,
+            decision,
+        )
+
     # Metering is a add-on to serving, never a precondition for it: if it cannot even be
     # constructed (e.g. no database configured), every check below degrades to "skip metering"
     # rather than turning into an unrelated 500 on every call.
@@ -318,6 +339,7 @@ async def chat_completions(request: Request):
         # pick up. The backend is never called, so nothing can be offered or promised. Not
         # coalesced (pre-dates S5): a duplicate raw request here records more than one turn, an
         # acceptable, low-stakes inaccuracy since no backend cost is ever attached to this path.
+        log_arrival("not_coalesced")
         await touch()
         await complete(None)
         text = (ch.out_of_hours_message or "").replace("{brand}", ch.spoken_brand_name)
@@ -325,7 +347,12 @@ async def chat_completions(request: Request):
     else:
         try:
             result = await get_coalescer().submit(
-                conversation_id, depth, turn, work, request.is_disconnected
+                conversation_id,
+                depth,
+                turn,
+                work,
+                request.is_disconnected,
+                on_decision=log_arrival,
             )
         except DailySpendCapExceeded:
             raise HTTPException(403, "tenant unavailable") from None
