@@ -167,3 +167,26 @@ The text columns are PII. They are never logged (a test asserts it) and are purg
 after `ORCA_METERING_TURN_RETENTION_DAYS` (default 30); calls, costs and `call_labels` are kept.
 No audio is stored. `call_labels` and `config_audit` are created here for the console (PR 2); nothing
 writes them yet. Turns from before this change do not exist and cannot be backfilled.
+
+## Numbers on voice (`channels/number_speech.py`)
+
+The final answer is verbalized in the voice adapter just before it is returned to the platform, so
+a caller hears words, not digits the TTS may read differently (a live call heard "one lakh" as
+something else and had to ask). Deterministic code, not a prompt. Chat is untouched; the shared
+coalescer result and the stored transcript keep the model's own text, only the spoken copy changes.
+Turn it off with `ORCA_VOICE_NUMBER_SPEECH=false`.
+
+Per sentence, language = Devanagari present or not. Nepali: plain numbers to words (lakh/crore,
+from an explicit 1-99 table), rupee amounts to words + रुपैयाँ (a trailing .0/.00 dropped), times
+to period + hour (साढे / सवा / पौने, डेढ / अढाई for 1:30 / 2:30), dates to English month + day,
+phone-like strings digit by digit. English: only phone strings and a trailing .0/.00 on a currency
+amount. Both digit scripts. Ambiguous input (ranges, percentages, decimals, negatives, leading
+zeros, invalid dates or times, numbers glued to letters) passes through unchanged and is counted by
+class at DEBUG, never logged as text. The per-turn log line carries counts only.
+
+Amounts: a rupee marker before the number (रु, Rs, NPR) or the rupee word after it (रुपैयाँ,
+रुपैया, rupees) makes it an amount. Dates: a date in the current year (tenant timezone) is read
+without the year; any other year is spoken.
+
+Known edges, by design: a bare run of 7 or more digits with no rupee marker is read as a phone
+number; a real decimal, a percentage or another currency is left alone.

@@ -23,11 +23,13 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from orca_gateway import deps
+from orca_gateway.channels.number_speech import verbalize
 from orca_gateway.coalescer import ClientGoneError, StaleTurnError, TurnCoalescer
 from orca_gateway.config import get_settings
 from orca_gateway.seam import Identity
@@ -417,6 +419,25 @@ async def chat_completions(request: Request):
             log.exception("voice turn failed conversation=%s depth=%s", conversation_id, depth)
             raise HTTPException(502, "upstream agent unavailable") from None
 
+    # Numbers are spoken as words: applied to the FINAL answer, per request, after the coalescer
+    # (the shared/cached result and the stored transcript keep the model's own text). Voice only;
+    # it can never raise, and anything ambiguous passes through unchanged.
+    spoken = result.answer
+    if get_settings().voice_number_speech:
+        # the year of 'today' where the tenant is, so a date in this year is read without it
+        this_year = deps.now().astimezone(ZoneInfo(cfg.timezone)).year
+        speech = verbalize(result.answer, current_year=this_year)
+        spoken = speech.text
+        if speech.converted:
+            # counts by class only: never the text (it can hold caller data)
+            log.info(
+                "voice number speech conversations=%d classes=%s conversation=%s depth=%d",
+                speech.converted,
+                dict(speech.conversions),
+                conversation_id,
+                depth,
+            )
+
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     model = body.get("model", "orca")
 
@@ -424,7 +445,7 @@ async def chat_completions(request: Request):
         yield _chunk(
             completion_id,
             model,
-            delta={"role": "assistant", "content": result.answer},
+            delta={"role": "assistant", "content": spoken},
             finish_reason=None,
         )
         yield _chunk(completion_id, model, delta={}, finish_reason="stop")
