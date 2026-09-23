@@ -119,6 +119,134 @@ class PgTenantRepository:
                 (on, channel, slug),
             )
 
+    async def list_tenants(self) -> list[dict]:
+        """Every tenant with its channels, for panel 1 (Fleet). Console-only read: unlike
+        `load()`, this is never on the request-serving path and is never cached."""
+        async with await self._connect() as conn:
+            cur = await conn.execute(
+                "select id, slug, display_name, is_active from orca_gw.tenants order by slug"
+            )
+            tenants = await cur.fetchall()
+            cur = await conn.execute(
+                f"select tenant_id, {_CHANNEL_COLS} from orca_gw.tenant_channels "
+                "order by channel"
+            )
+            by_tenant: dict = {}
+            for row in await cur.fetchall():
+                by_tenant.setdefault(row["tenant_id"], []).append(row)
+            for t in tenants:
+                t["channels"] = by_tenant.get(t["id"], [])
+            return tenants
+
+    async def set_channel_field(
+        self, slug: str, channel: str, on: bool, *, field: str, actor: str = "console"
+    ) -> tuple[bool, bool]:
+        """Toggle a boolean channel field (kill_switch or is_enabled) and write a config_audit
+        row (before, after). `field` is never taken from request input -- callers pass a literal,
+        so this can never become an arbitrary-column write."""
+        if field not in ("kill_switch", "is_enabled"):
+            raise ValueError(f"not an audited toggle field: {field}")
+        async with await self._connect() as conn, conn.transaction():
+            cur = await conn.execute(
+                f"select t.id as tenant_id, tc.{field} as before "
+                "from orca_gw.tenants t join orca_gw.tenant_channels tc on tc.tenant_id = t.id "
+                "where t.slug = %s and tc.channel = %s for update",
+                (slug, channel),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise ValueError(f"no such tenant/channel: {slug}/{channel}")
+            await conn.execute(
+                f"update orca_gw.tenant_channels set {field} = %s, updated_at = now() "
+                "where tenant_id = %s and channel = %s",
+                (on, row["tenant_id"], channel),
+            )
+            await conn.execute(
+                "insert into orca_gw.config_audit "
+                "(tenant_id, channel, action, before, after, actor) "
+                "values (%s, %s, %s, %s, %s, %s)",
+                (
+                    row["tenant_id"],
+                    channel,
+                    field,
+                    json.dumps({field: row["before"]}),
+                    json.dumps({field: on}),
+                    actor,
+                ),
+            )
+            return row["before"], on
+
+    async def update_tenant_timezone(
+        self, slug: str, timezone: str, *, actor: str = "console"
+    ) -> None:
+        """Panel 4 also edits the tenant-level IANA timezone (hours/availability are computed in
+        it). A no-op (no audit row) if unchanged."""
+        async with await self._connect() as conn, conn.transaction():
+            cur = await conn.execute(
+                "select id, timezone from orca_gw.tenants where slug = %s for update", (slug,)
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise ValueError(f"no such tenant: {slug}")
+            if row["timezone"] == timezone:
+                return
+            await conn.execute(
+                "update orca_gw.tenants set timezone = %s, updated_at = now() where id = %s",
+                (timezone, row["id"]),
+            )
+            await conn.execute(
+                "insert into orca_gw.config_audit "
+                "(tenant_id, channel, action, before, after, actor) "
+                "values (%s, null, 'timezone', %s, %s, %s)",
+                (
+                    row["id"],
+                    json.dumps({"timezone": row["timezone"]}),
+                    json.dumps({"timezone": timezone}),
+                    actor,
+                ),
+            )
+
+    async def update_channel_config(
+        self, slug: str, channel: str, updates: dict, *, actor: str = "console"
+    ) -> tuple[dict, dict]:
+        """Panel 4 save: validate by constructing a ChannelConfig from the merged fields (the
+        same model the request path trusts), write it, and record one config_audit row with the
+        full before/after channel config. Raises pydantic's ValidationError on bad input -- the
+        route turns that into a 400 with the field errors, never a partial write."""
+        async with await self._connect() as conn, conn.transaction():
+            cur = await conn.execute(
+                f"select t.id as tenant_id, {_CHANNEL_COLS} "
+                "from orca_gw.tenants t join orca_gw.tenant_channels tc on tc.tenant_id = t.id "
+                "where t.slug = %s and tc.channel = %s for update",
+                (slug, channel),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise ValueError(f"no such tenant/channel: {slug}/{channel}")
+            tenant_id = row.pop("tenant_id")
+            before = dict(row)
+            before["daily_spend_cap"] = (
+                None if before["daily_spend_cap"] is None else float(before["daily_spend_cap"])
+            )
+            merged = {**before, **updates}
+            cfg = ChannelConfig(**merged)  # raises ValidationError on bad input
+            await self._upsert_channel(conn, tenant_id, cfg)
+            after = cfg.model_dump(mode="json")
+            await conn.execute(
+                "insert into orca_gw.config_audit "
+                "(tenant_id, channel, action, before, after, actor) "
+                "values (%s, %s, %s, %s, %s, %s)",
+                (
+                    tenant_id,
+                    channel,
+                    "update_channel_config",
+                    json.dumps(before, default=str),
+                    json.dumps(after, default=str),
+                    actor,
+                ),
+            )
+            return before, after
+
     @staticmethod
     async def _upsert_channel(conn, tenant_id, ch: ChannelConfig) -> None:
         await conn.execute(

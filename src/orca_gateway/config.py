@@ -34,6 +34,19 @@ class Settings(BaseSettings):
     # Commit the running image was built from (set by the Docker build).
     git_sha: str = "unknown"
 
+    # Console (S6 PR 2). One shared secret, exchanged at /console/login for a signed session
+    # cookie -- no user accounts. Required at runtime; the route fails closed if unset (same
+    # pattern as voice_shared_secret). Also used to sign/verify the session cookie itself (HMAC),
+    # so there is exactly one secret to rotate, not two.
+    console_secret: str = ""
+    console_session_ttl_s: int = 12 * 60 * 60
+    # Panel 2 links out to the ElevenLabs conversation instead of storing audio (S6 brief §2).
+    # {conversation_id} is substituted. Best-guess dashboard URL pattern -- correct via env if
+    # ElevenLabs' actual path differs; the console never fails if it's wrong, it just links wrong.
+    console_elevenlabs_conversation_url: str = (
+        "https://elevenlabs.io/app/conversational-ai/history?conversation={conversation_id}"
+    )
+
     # Metering (S5). A call is considered ended when no turn arrives for its conversation_id for
     # this long -- there is no telephony hangup signal to end it on (see 0002_calls.sql). Swept
     # periodically, not on the request path.

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Cost — Orca console{% endblock %}
+{% block content %}
+<h1>Cost</h1>
+<p class="sub">This UTC calendar month, per tenant. STT/TTS/telephony are not automated yet.</p>
+<table>
+<thead><tr>
+  <th>Tenant</th><th>Calls</th><th>Turns</th><th>Tokens</th><th>Known LLM cost</th>
+  <th>Unknown-cost calls</th><th>$/call</th><th>$/minute</th>
+  <th>STT</th><th>TTS</th><th>Telephony</th><th></th>
+</tr></thead>
+<tbody>
+{% for r in rows %}
+<tr>
+  <td>{{ r.display_name }} <span class="muted">({{ r.tenant_slug }})</span>
+    {% if r.has_overstated %}<div class="flag">includes pre-metering-fix calls</div>{% endif %}</td>
+  <td>{{ r.calls }}</td>
+  <td>{{ r.turns }}</td>
+  <td>{{ r.tokens }}</td>
+  <td>${{ "%.4f"|format(r.known_llm_cost_usd) }}</td>
+  <td>{{ r.unknown_cost_calls }}</td>
+  <td>{% if r.cost_per_call is not none %}${{ "%.4f"|format(r.cost_per_call) }}{% else %}—{% endif %}</td>
+  <td>{% if r.cost_per_minute is not none %}${{ "%.4f"|format(r.cost_per_minute) }}{% else %}—{% endif %}</td>
+  <td class="muted">manual, see reconciliation doc</td>
+  <td class="muted">manual, see reconciliation doc</td>
+  <td class="muted">manual, see reconciliation doc</td>
+  <td><a class="button" href="/console/cost/export.csv?tenant_slug={{ r.tenant_slug }}">CSV</a></td>
+</tr>
+{% else %}
+<tr><td colspan="11" class="muted">No calls this month.</td></tr>
+{% endfor %}
+</tbody>
+</table>
+<p style="margin-top:16px;"><a class="button" href="/console/cost/export.csv">Export all tenants (CSV)</a></p>
+<p class="sub" style="margin-top:10px;">
+  Rows for calls started before {{ cutoff }} (the PR #10 metering-fix deploy) may be overstated
+  by the bug it fixed and are flagged, never silently included as if accurate.
+</p>
+{% endblock %}

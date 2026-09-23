@@ -34,6 +34,17 @@ Tenants are **data**, not configuration: rows in Postgres (schema `orca_gw`), so
 by rows and never by code. See `docs/TENANT-CONFIG.md`. A voice request names its tenant with the
 `X-Orca-Tenant` header; there is no default tenant.
 
+## Console
+
+`/console/*`: four server-rendered panels (Fleet, Calls, Cost, Config) over the data above.
+Server-rendered FastAPI + Jinja2, no JS framework, no build step. Auth is one shared secret
+(`ORCA_CONSOLE_SECRET`) exchanged at `/console/login` for a signed, `HttpOnly`, `Secure`,
+`SameSite=Strict` session cookie -- no user accounts. PII-bearing (call transcripts), so it is
+never part of the public surface pinned above by omission: it is its own gated router, checked
+from outside on every deploy (`.github/workflows/deploy.yml`'s `verify` job). Every write (kill
+switch, enable/disable, config edit, call/turn label) leaves one `orca_gw.config_audit` row. See
+`docs/agent-platform/S6-OPERATING-PANELS-BRIEF.md` in the brain folder for the full spec.
+
 ## Run
 
 ```bash

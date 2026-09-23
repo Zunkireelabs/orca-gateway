@@ -106,15 +106,16 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
           ORCA_VOICE_SHARED_SECRET: ${{ secrets.ORCA_VOICE_SHARED_SECRET }}
           ORCA_DATABASE_URL: ${{ secrets.ORCA_DATABASE_URL }}
+          ORCA_CONSOLE_SECRET: ${{ secrets.ORCA_CONSOLE_SECRET }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,ORCA_VOICE_SHARED_SECRET,ORCA_DATABASE_URL
+          envs: GHCR_TOKEN,GHCR_USER,IMAGE_TAG,ORCA_VOICE_SHARED_SECRET,ORCA_DATABASE_URL,ORCA_CONSOLE_SECRET
           script: |
             set -e   # never `set -x`: this script handles secrets
 
-            for v in GHCR_TOKEN IMAGE_TAG ORCA_VOICE_SHARED_SECRET ORCA_DATABASE_URL; do
+            for v in GHCR_TOKEN IMAGE_TAG ORCA_VOICE_SHARED_SECRET ORCA_DATABASE_URL ORCA_CONSOLE_SECRET; do
               # [ -n ] only: never ${VAR:-default}, which would print the value.
               if [ -z "$(printenv $v)" ]; then echo "::error::required secret/var $v is empty"; exit 1; fi
             done
@@ -148,6 +149,7 @@ jobs:
               # there is deliberately no per-tenant setting in this file.
               printf 'ORCA_VOICE_SHARED_SECRET=%s\n' "$ORCA_VOICE_SHARED_SECRET"
               printf 'ORCA_DATABASE_URL=%s\n' "$ORCA_DATABASE_URL"
+              printf 'ORCA_CONSOLE_SECRET=%s\n' "$ORCA_CONSOLE_SECRET"
               # Zunkiree stage has a 2-socket pool sharing a ceiling with PROD. Do not raise.
               echo "ORCA_VOICE_MAX_CONCURRENT_RUNS=1"
               echo "ORCA_VOICE_RUN_TIMEOUT_S=25.0"
@@ -240,4 +242,19 @@ jobs:
           else
             echo "::error::HSTS header missing on GET /health"; fail=1
           fi
+
+          # S6 brief §4.1: /console/* is 401 or a redirect WITHOUT a session cookie, never 200.
+          # No cookie is ever sent here -- this is exactly the anonymous-browser case.
+          console_gated() { # name path
+            got="$(code "$URL$2")"
+            case "$got" in 401|301|302|303|307|308) echo "OK  $1 -> $got (gated)" ;;
+              *) echo "::error::$1 expected 401 or a redirect, got $got"; fail=1 ;; esac
+          }
+          console_gated "GET /console/fleet"           "/console/fleet"
+          console_gated "GET /console/calls"           "/console/calls"
+          console_gated "GET /console/cost"            "/console/cost"
+          console_gated "GET /console/config"          "/console/config"
+          console_gated "GET /console/"                "/console/"
+          # The login page itself must still render (200) with no cookie -- it's how you get one.
+          check "GET /console/login" 200 "$(code "$URL/console/login")"
           exit $fail

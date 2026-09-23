@@ -1,8 +1,9 @@
 # orca-gateway (stage). CI passes IMAGE_TAG=<full sha>; the VPS pulls, never builds.
 #
-# PUBLIC SURFACE = exactly `POST /chat/completions` and `GET /health`. Enforced HERE, in the
-# Traefik router rule, and not only in the app: this allowlist is what keeps any future
-# accidental route (e.g. an unauthenticated entry point) from being reachable.
+# PUBLIC SURFACE = `POST /chat/completions`, `GET /health`, and (S6) everything under `/console`
+# -- which is its OWN router below, PII-bearing and gated by its own auth (console_auth.py), never
+# by omission here. Enforced in Traefik and not only in the app: this allowlist is what keeps any
+# future accidental route (e.g. an unauthenticated entry point) from being reachable.
 #
 # Run exactly ONE uvicorn worker. Turn de-duplication and the global backend-run cap live in
 # process memory; a second worker would silently split them.
@@ -28,6 +29,14 @@ services:
       - "traefik.http.middlewares.hsts-orca-gw-stage.headers.stsSeconds=31536000"
       - "traefik.http.routers.orca-gw-stage.middlewares=hsts-orca-gw-stage"
       - "traefik.http.services.orca-gw-stage.loadbalancer.server.port=8000"
+      # S6: the console, its own router. PII-bearing, so auth is enforced in the app
+      # (console_auth.py) on every method and path under the prefix -- this router just lets the
+      # traffic through to it, same as the two routes above let their own traffic through.
+      - "traefik.http.routers.orca-gw-stage-console.rule=Host(`orca-gw-stage.zunkireelabs.com`) && PathPrefix(`/console`)"
+      - "traefik.http.routers.orca-gw-stage-console.entrypoints=websecure"
+      - "traefik.http.routers.orca-gw-stage-console.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.orca-gw-stage-console.middlewares=hsts-orca-gw-stage"
+      - "traefik.http.routers.orca-gw-stage-console.service=orca-gw-stage"
     networks:
       - hosting
 
