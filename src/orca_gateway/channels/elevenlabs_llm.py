@@ -154,6 +154,20 @@ async def chat_completions(request: Request):
     slug = _tenant_slug(request)
     log = logging.getLogger("orca_gateway.channels.elevenlabs_llm")
 
+    def log_leg(leg: str, mono: float) -> None:
+        # Diagnostic-only timing points (latency breakdown brief §1), correlated with the
+        # arrival log line by conversation_id + depth + span, and with each other by mono
+        # deltas. Never used for anything but computing dispatch-arrival, backend_response-
+        # dispatch, first_audio-backend_response.
+        log.info(
+            "voice latency leg=%s conversation=%s depth=%d span=%s mono=%.3f",
+            leg,
+            conversation_id,
+            depth,
+            _span_id(request),
+            mono,
+        )
+
     def log_arrival(decision: str) -> None:
         # Observability only. The hash, never the text: a turn can contain caller PII.
         log.info(
@@ -349,6 +363,7 @@ async def chat_completions(request: Request):
         usage: dict | None = None
         tools: list[dict] = []  # opaque {name, status} strings; the gateway never interprets them
         completed = False
+        log_leg("dispatch", time.monotonic())
         try:
             async for event in backend.session(
                 agent_id=ch.agent_id,
@@ -361,6 +376,7 @@ async def chat_completions(request: Request):
                 if event.type == "token":
                     answer_tokens.append(event.data.get("text", ""))
                 elif event.type == "done":
+                    log_leg("backend_response_received", time.monotonic())
                     answer = event.data.get("answer", "")
                 elif event.type == "usage":
                     usage = event.data
@@ -442,6 +458,10 @@ async def chat_completions(request: Request):
     model = body.get("model", "orca")
 
     async def stream():
+        # This is the first byte StreamingResponse actually writes back to ElevenLabs: log
+        # immediately before yielding it, not after building `spoken` above (that work already
+        # happened by the time stream() is even constructed).
+        log_leg("first_audio_sent", time.monotonic())
         yield _chunk(
             completion_id,
             model,
