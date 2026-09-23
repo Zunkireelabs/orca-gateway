@@ -7,17 +7,21 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import psycopg
 from psycopg.rows import dict_row
+
+from orca_gateway.db_schema import connection_class, validate_schema
 
 
 class Reporting:
-    def __init__(self, database_url: str, *, connect_timeout: int = 5) -> None:
+    def __init__(
+        self, database_url: str, *, schema: str = "orca_gw", connect_timeout: int = 5
+    ) -> None:
         self._url = database_url
+        self._schema = validate_schema(schema)
         self._connect_timeout = connect_timeout
 
     def _connect(self):
-        return psycopg.AsyncConnection.connect(
+        return connection_class(self._schema).connect(
             self._url,
             autocommit=True,
             prepare_threshold=None,

@@ -22,7 +22,7 @@ def get_tenant_repo() -> PgTenantRepository:
     settings = get_settings()
     if not settings.database_url:
         raise TenantStoreError("ORCA_DATABASE_URL is not set")
-    return PgTenantRepository(settings.database_url)
+    return PgTenantRepository(settings.database_url, schema=settings.db_schema)
 
 
 @lru_cache
@@ -39,7 +39,7 @@ def get_calls_repo() -> PgCallsRepository:
     settings = get_settings()
     if not settings.database_url:
         raise TenantStoreError("ORCA_DATABASE_URL is not set")
-    return PgCallsRepository(settings.database_url)
+    return PgCallsRepository(settings.database_url, schema=settings.db_schema)
 
 
 @lru_cache

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from orca_gateway.db_schema import validate_schema
 
 
 class Settings(BaseSettings):
@@ -12,8 +15,17 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="ORCA_", env_file=".env")
 
-    # Tenant config lives in Postgres (schema orca_gw). Required at runtime.
+    # Tenant config lives in Postgres (schema `db_schema`). Required at runtime.
     database_url: str = ""
+    # P2 brief D2: stage and prod share one Supabase project but never a schema. Defaults to
+    # `orca_gw` (stage's schema, unchanged); prod sets `orca_gw_prod`. Validated as a plain
+    # identifier here -- fail at startup, not on the first query.
+    db_schema: str = "orca_gw"
+
+    @field_validator("db_schema")
+    @classmethod
+    def _validate_db_schema(cls, v: str) -> str:
+        return validate_schema(v)
     # A config edit takes effect within this many seconds unless invalidated explicitly.
     tenant_cache_ttl_s: float = 15.0
 
