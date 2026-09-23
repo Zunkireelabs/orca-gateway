@@ -6,13 +6,13 @@
 > test fixtures and tenant-config *values*. Grep before every PR.
 
 The channel and control plane for Orca: the agent seam, channel adapters (voice first), tenant
-config, metering, and a console UI. It does **not** hold agents — the clinic agent stays in
-Zunkiree and is reached over HTTP through the seam.
+config, metering, and a console UI. It does **not** hold agents *yet* — the clinic agent stays in
+Zunkiree and is reached over HTTP through the seam, and the brain (agent definitions, run loop,
+evals) moves into this repo's middle box at Q4 convergence, seams unchanged. See `CLAUDE.md`.
 
 ## Status
 
-S3b — deployed to stage at `https://orca-gw-stage.zunkireelabs.com` (see `docs/DEPLOY.md`).
-Public surface: `POST /chat/completions` and `GET /health` only.
+See `docs/DEPLOY.md`.
 
 ## The seam
 
@@ -43,7 +43,7 @@ Server-rendered FastAPI + Jinja2, no JS framework, no build step. Auth is one sh
 never part of the public surface pinned above by omission: it is its own gated router, checked
 from outside on every deploy (`.github/workflows/deploy.yml`'s `verify` job). Every write (kill
 switch, enable/disable, config edit, call/turn label) leaves one `orca_gw.config_audit` row. See
-`docs/agent-platform/S6-OPERATING-PANELS-BRIEF.md` in the brain folder for the full spec.
+`docs/orca-platform/platform/S6-OPERATING-PANELS-BRIEF.md` in the brain folder for the full spec.
 
 ## Run
 
