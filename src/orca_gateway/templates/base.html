@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Orca console{% endblock %}</title>
+<style>
+  :root { color-scheme: light; }
+  body { font: 14px/1.4 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; margin: 0;
+         color: #1a1a1a; background: #fafafa; }
+  header { background: #17203a; color: #fff; padding: 10px 20px; display: flex;
+           align-items: center; gap: 24px; }
+  header a { color: #cfd8e8; text-decoration: none; font-weight: 500; }
+  header a.active, header a:hover { color: #fff; }
+  header .brand { font-weight: 700; color: #fff; margin-right: 12px; }
+  header form { margin-left: auto; }
+  header button { background: none; border: 1px solid #445; color: #cfd8e8; border-radius: 4px;
+                  padding: 4px 10px; cursor: pointer; }
+  main { padding: 20px; max-width: 1200px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #666; margin-bottom: 18px; }
+  table { border-collapse: collapse; width: 100%; background: #fff; font-size: 13px; }
+  th, td { border-bottom: 1px solid #e5e5e5; padding: 7px 10px; text-align: left;
+           vertical-align: top; }
+  th { background: #f0f1f4; font-weight: 600; }
+  tr:hover td { background: #f7f9fc; }
+  .banner { background: #b3261e; color: #fff; padding: 10px 16px; border-radius: 6px;
+             margin-bottom: 16px; font-weight: 600; }
+  .flag { background: #fff4d6; color: #7a5b00; border-radius: 3px; padding: 1px 6px;
+          font-size: 11px; font-weight: 600; }
+  .badge-on { color: #b3261e; font-weight: 700; }
+  .badge-off { color: #1c7a3c; }
+  .muted { color: #888; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px;
+          font-weight: 600; }
+  .pill-good { background: #e3f5e9; color: #1c7a3c; }
+  .pill-bad { background: #fbe4e2; color: #b3261e; }
+  .pill-unsure { background: #eee; color: #555; }
+  form.inline { display: inline; }
+  .filters { margin-bottom: 14px; }
+  .filters input, .filters select { padding: 4px 6px; margin-right: 8px; }
+  fieldset { border: 1px solid #ddd; border-radius: 6px; margin-bottom: 14px; padding: 12px 16px; }
+  legend { font-weight: 600; padding: 0 6px; }
+  label { display: block; margin: 8px 0 3px; font-weight: 500; }
+  input[type=text], input[type=number], input[type=time], select, textarea {
+    padding: 5px 7px; width: 320px; max-width: 100%; box-sizing: border-box; }
+  .field-note { color: #888; font-size: 12px; margin-top: 2px; }
+  .not-enforced { color: #b3261e; font-size: 11px; font-weight: 600; }
+  .actions { margin-top: 14px; }
+  button.primary { background: #17203a; color: #fff; border: none; border-radius: 4px;
+                   padding: 7px 16px; cursor: pointer; }
+  .error { background: #fbe4e2; color: #7a1712; padding: 10px 14px; border-radius: 6px;
+           margin-bottom: 14px; }
+  .ok { background: #e3f5e9; color: #1c7a3c; padding: 10px 14px; border-radius: 6px;
+        margin-bottom: 14px; }
+  a.button { display: inline-block; padding: 5px 12px; border: 1px solid #ccc; border-radius: 4px;
+             text-decoration: none; color: #222; font-size: 12px; }
+  code { background: #f0f1f4; padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+{% if session %}
+<header>
+  <span class="brand">orca console</span>
+  <a href="/console/fleet" class="{{ 'active' if active == 'fleet' }}">Fleet</a>
+  <a href="/console/calls" class="{{ 'active' if active == 'calls' }}">Calls</a>
+  <a href="/console/cost" class="{{ 'active' if active == 'cost' }}">Cost</a>
+  <a href="/console/config" class="{{ 'active' if active == 'config' }}">Config</a>
+  <form method="post" action="/console/logout">
+    <input type="hidden" name="csrf_token" value="{{ session }}">
+    <button type="submit">Log out</button>
+  </form>
+</header>
+{% endif %}
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

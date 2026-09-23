@@ -7,3 +7,5 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .DS_Store
+temp_ss/
+.secrets-local/

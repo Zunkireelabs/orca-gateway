@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Call {{ call.conversation_id }} — Orca console{% endblock %}
+{% block content %}
+<p><a href="/console/calls" class="button">&larr; Calls</a></p>
+<h1>{{ call.display_name }} <span class="muted">({{ call.tenant_slug }} / {{ call.channel }})</span></h1>
+<p class="sub">
+  conversation_id <code>{{ call.conversation_id }}</code>
+  &middot; started {{ call.started_at.strftime("%Y-%m-%d %H:%M:%S UTC") }}
+  &middot; {% if call.ended_at %}ended {{ call.ended_reason }}{% else %}<span class="muted">open</span>{% endif %}
+  &middot; <a href="{{ eleven_url }}" target="_blank" rel="noopener">ElevenLabs conversation &#8599;</a>
+</p>
+{% if call.overstated %}
+<div class="error">This call started before the PR #10 metering fix
+  ({{ cutoff }}) — its known cost may be overstated (duplicate-counted coalescer restarts).</div>
+{% endif %}
+{% if success %}<div class="ok">{{ success }}</div>{% endif %}
+
+<h2 style="font-size:15px;">Label this call</h2>
+<form method="post" action="/console/calls/{{ call.id }}/label" style="margin-bottom:20px;">
+  <input type="hidden" name="csrf_token" value="{{ session }}">
+  <input type="hidden" name="depth" value="">
+  <select name="verdict"><option value="good">good</option><option value="bad">bad</option>
+    <option value="unsure">unsure</option></select>
+  <input type="text" name="note" placeholder="note (optional)" style="width:280px;">
+  <button type="submit">Label call</button>
+</form>
+
+<h2 style="font-size:15px;">Turns</h2>
+<table>
+<thead><tr>
+  <th>Depth</th><th>User said</th><th>Agent answered</th><th>Tools</th><th>Latency</th>
+  <th>Requests / restarts / joins</th><th>Answered by</th><th>Label</th>
+</tr></thead>
+<tbody>
+{% for t in call.turns %}
+<tr>
+  <td>{{ t.depth }}</td>
+  <td>{{ t.user_text or "—" }}</td>
+  <td>{{ t.answer_text or "—" }}</td>
+  <td>
+    {% for tool in t.tools %}<div><code>{{ tool.name }}:{{ tool.status }}</code></div>{% else %}<span class="muted">none</span>{% endfor %}
+  </td>
+  <td>{{ t.latency_ms }}ms</td>
+  <td>
+    {% if t.coalescer %}
+      {{ t.coalescer.requests|default(0) }} / {{ t.coalescer.restarts|default(0) }} / {{ t.coalescer.joins|default(0) }}
+    {% else %}<span class="muted">—</span>{% endif %}
+  </td>
+  <td>{% if t.ended_by %}<span class="flag">gateway: {{ t.ended_by }}</span>{% else %}agent{% endif %}</td>
+  <td>
+    <form method="post" action="/console/calls/{{ call.id }}/label" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ session }}">
+      <input type="hidden" name="depth" value="{{ t.depth }}">
+      <select name="verdict" style="width:auto;"><option value="good">good</option>
+        <option value="bad">bad</option><option value="unsure">unsure</option></select>
+      <button type="submit">Label</button>
+    </form>
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="8" class="muted">No turns on record (purged after the retention window, or none arrived).</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+{% if call.labels %}
+<h2 style="font-size:15px;">Labels</h2>
+<table>
+<thead><tr><th>When</th><th>Scope</th><th>Verdict</th><th>Note</th></tr></thead>
+<tbody>
+{% for l in call.labels %}
+<tr>
+  <td>{{ l.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+  <td>{% if l.depth is none %}whole call{% else %}turn {{ l.depth }}{% endif %}</td>
+  <td><span class="pill pill-{{ l.verdict }}">{{ l.verdict }}</span></td>
+  <td>{{ l.note or "" }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endif %}
+{% endblock %}

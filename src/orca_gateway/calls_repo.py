@@ -323,6 +323,36 @@ class PgCallsRepository:
             row = await cur.fetchone()
             return float(row["llm_cost_usd"]) if row else 0.0
 
+    async def add_label(
+        self, *, call_id: str, depth: int | None, verdict: str, note: str | None
+    ) -> None:
+        """Panel 2 write: the eval-set seed (vision §5). `depth = None` labels the whole call;
+        an integer labels one turn. Never a foreign key to `turns` -- a label must outlive the
+        30-day purge of the turn text it was about. Audited like every other console write (before
+        is always null: a label is an addition, not an edit of a prior one)."""
+        async with await self._connect() as conn, conn.transaction():
+            cur = await conn.execute(
+                "select tenant_id, channel from orca_gw.calls where id = %s", (call_id,)
+            )
+            call = await cur.fetchone()
+            if call is None:
+                raise ValueError(f"no such call: {call_id}")
+            await conn.execute(
+                "insert into orca_gw.call_labels (call_id, depth, verdict, note) "
+                "values (%s, %s, %s, %s)",
+                (call_id, depth, verdict, note),
+            )
+            await conn.execute(
+                "insert into orca_gw.config_audit "
+                "(tenant_id, channel, action, before, after, actor) "
+                "values (%s, %s, 'call_label', null, %s, 'console')",
+                (
+                    call["tenant_id"],
+                    call["channel"],
+                    Jsonb({"call_id": call_id, "depth": depth, "verdict": verdict, "note": note}),
+                ),
+            )
+
     async def sweep_idle(self, idle_s: float = 300.0) -> list[str]:
         """Closes every open call whose last_turn_at is older than idle_s (default 5 minutes --
         see 0002_calls.sql: a real phone call is not silent that long) with ended_reason

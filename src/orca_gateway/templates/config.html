@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Config — Orca console{% endblock %}
+{% block content %}
+<h1>Config</h1>
+{% if not tenant_slug %}
+<p class="sub">Pick a tenant and channel to edit.</p>
+<table>
+<thead><tr><th>Tenant</th><th>Channel</th><th></th></tr></thead>
+<tbody>
+{% for row in tenant_channels %}
+<tr>
+  <td>{{ row.display_name }} <span class="muted">({{ row.tenant_slug }})</span></td>
+  <td>{{ row.channel }}</td>
+  <td><a class="button" href="/console/config/{{ row.tenant_slug }}/{{ row.channel }}">Edit</a></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="sub"><a href="/console/config">&larr; All tenants</a></p>
+<h2 style="font-size:16px;">{{ display_name }} ({{ tenant_slug }}) — {{ channel }}</h2>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+{% if success %}<div class="ok">{{ success }}
+  The change takes effect within the tenant-config cache TTL ({{ cache_ttl_s }}s) — no deploy needed.</div>{% endif %}
+
+<form method="post" action="/console/config/{{ tenant_slug }}/{{ channel }}">
+<input type="hidden" name="csrf_token" value="{{ session }}">
+
+<fieldset>
+<legend>Identity &amp; routing</legend>
+<label>Timezone (IANA)</label>
+<input type="text" name="timezone" value="{{ timezone }}">
+<label>Agent ID (gateway-side)</label>
+<input type="text" name="agent_id" value="{{ ch.agent_id }}">
+<label>ElevenLabs agent ID <span class="field-note">from the ElevenLabs dashboard</span></label>
+<input type="text" name="elevenlabs_agent_id" value="{{ ch.elevenlabs_agent_id or '' }}">
+<label><input type="checkbox" name="is_enabled" style="width:auto;display:inline;" {% if ch.is_enabled %}checked{% endif %}> Channel enabled</label>
+<label><input type="checkbox" name="kill_switch" style="width:auto;display:inline;" {% if ch.kill_switch %}checked{% endif %}> Kill switch on</label>
+</fieldset>
+
+<fieldset>
+<legend>Language &amp; voice</legend>
+<label>Languages <span class="field-note">comma-separated, e.g. en,ne</span></label>
+<input type="text" name="languages" value="{{ ch.languages|join(',') }}">
+<label>Default language</label>
+<input type="text" name="default_language" value="{{ ch.default_language }}">
+<label>Voice ID</label>
+<input type="text" name="voice_id" value="{{ ch.voice_id or '' }}">
+<label>Spoken brand name <span class="field-note">how the name is SAID</span></label>
+<input type="text" name="spoken_brand_name" value="{{ ch.spoken_brand_name }}">
+</fieldset>
+
+<fieldset>
+<legend>Hours &amp; handoff</legend>
+<label class="field-note">Handoff windows per weekday, local time. Format: 09:00-17:00, or
+  multiple as 09:00-12:00,13:00-17:00. Leave a day blank for no handoff that day. Leave every
+  day blank for "no handoff hours configured."</label>
+{% for wd, name in [(0,'Mon'),(1,'Tue'),(2,'Wed'),(3,'Thu'),(4,'Fri'),(5,'Sat'),(6,'Sun')] %}
+<label>{{ name }}</label>
+<input type="text" name="handoff_hours_{{ wd }}" value="{{ handoff_hours_text[wd] }}">
+{% endfor %}
+<label>Handoff target</label>
+<input type="text" name="handoff_target" value="{{ ch.handoff_target or '' }}">
+<label>Out-of-hours behaviour</label>
+<select name="out_of_hours_behaviour">
+  <option value="say_closed" {% if ch.out_of_hours_behaviour == 'say_closed' %}selected{% endif %}>say_closed</option>
+  <option value="take_message" {% if ch.out_of_hours_behaviour == 'take_message' %}selected{% endif %}>take_message <span class="not-enforced">(stored, not enforced)</span></option>
+  <option value="handoff_anyway" {% if ch.out_of_hours_behaviour == 'handoff_anyway' %}selected{% endif %}>handoff_anyway <span class="not-enforced">(stored, not enforced)</span></option>
+</select>
+<div class="field-note">take_message and handoff_anyway are stored but do nothing today — only
+  say_closed changes what the caller hears.</div>
+<label>Out-of-hours message <span class="field-note">required if behaviour = say_closed; {brand} is substituted</span></label>
+<textarea name="out_of_hours_message" rows="2">{{ ch.out_of_hours_message or '' }}</textarea>
+<label>Closed dates <span class="field-note">comma-separated YYYY-MM-DD</span></label>
+<input type="text" name="closed_dates" value="{{ ch.closed_dates|map('string')|join(',') }}">
+<label>Closed weekdays</label>
+{% for wd, name in [(0,'Mon'),(1,'Tue'),(2,'Wed'),(3,'Thu'),(4,'Fri'),(5,'Sat'),(6,'Sun')] %}
+<label style="display:inline;font-weight:normal;margin-right:10px;">
+  <input type="checkbox" name="closed_weekdays" value="{{ wd }}" style="width:auto;display:inline;"
+    {% if wd in ch.closed_weekdays %}checked{% endif %}> {{ name }}</label>
+{% endfor %}
+</fieldset>
+
+<fieldset>
+<legend>Escalation</legend>
+<label>Escalation policy</label>
+<select name="escalation_policy">
+  <option value="none" {% if ch.escalation_policy == 'none' %}selected{% endif %}>none</option>
+  <option value="handoff" {% if ch.escalation_policy == 'handoff' %}selected{% endif %}>handoff</option>
+  <option value="instruction" {% if ch.escalation_policy == 'instruction' %}selected{% endif %}>instruction</option>
+</select>
+<label>Escalation instruction</label>
+<textarea name="escalation_instruction" rows="2">{{ ch.escalation_instruction or '' }}</textarea>
+</fieldset>
+
+<fieldset>
+<legend>Caps</legend>
+<label>Max session seconds</label>
+<input type="number" name="max_session_seconds" value="{{ ch.max_session_seconds or '' }}">
+<label>Daily spend cap (USD)</label>
+<input type="number" step="0.01" name="daily_spend_cap" value="{{ ch.daily_spend_cap if ch.daily_spend_cap is not none else '' }}">
+<label>Per-caller rate limit <span class="not-enforced">(stored, not enforced)</span></label>
+<input type="number" name="per_caller_rate_limit" value="{{ ch.per_caller_rate_limit or '' }}">
+</fieldset>
+
+<div class="actions"><button class="primary" type="submit">Save</button></div>
+</form>
+{% endif %}
+{% endblock %}

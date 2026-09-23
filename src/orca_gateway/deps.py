@@ -15,12 +15,23 @@ from orca_gateway.tenants import TenantStore, TenantStoreError
 
 
 @lru_cache
+def get_tenant_repo() -> PgTenantRepository:
+    """The repository underneath get_tenant_store(), exposed directly for the console: console
+    reads (fleet, config forms) and writes must never go through the 15s-TTL cache -- a save must
+    be visible on the very next page load, not up to 15s later."""
+    settings = get_settings()
+    if not settings.database_url:
+        raise TenantStoreError("ORCA_DATABASE_URL is not set")
+    return PgTenantRepository(settings.database_url)
+
+
+@lru_cache
 def get_tenant_store() -> TenantStore:
     settings = get_settings()
     if not settings.database_url:
         # Fail closed and cleanly: the adapter turns this into a 503, never a traceback.
         raise TenantStoreError("ORCA_DATABASE_URL is not set")
-    return TenantStore(PgTenantRepository(settings.database_url), ttl_s=settings.tenant_cache_ttl_s)
+    return TenantStore(get_tenant_repo(), ttl_s=settings.tenant_cache_ttl_s)
 
 
 @lru_cache

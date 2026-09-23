@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Fleet — Orca console{% endblock %}
+{% block content %}
+<h1>Fleet</h1>
+<p class="sub">Which agents are live, on which tenant and channel.</p>
+{% if any_alert %}
+<div class="banner">
+  One or more channels have had calls in the last hour that ended in trouble
+  (abandoned runs or ended_reason = error). See the highlighted rows below.
+</div>
+{% endif %}
+<table>
+<thead><tr>
+  <th>Tenant</th><th>Channel</th><th>Agent ID</th><th>Enabled</th><th>Kill switch</th>
+  <th>Calls today</th><th>Known spend today</th><th>Last call</th><th></th>
+</tr></thead>
+<tbody>
+{% for r in rows %}
+<tr {% if r.alert %}style="background:#fdeceb;"{% endif %}>
+  <td>{{ r.display_name }} <span class="muted">({{ r.tenant_slug }})</span></td>
+  <td>{{ r.channel }}</td>
+  <td><code>{{ r.agent_id }}</code></td>
+  <td>{% if r.is_enabled %}<span class="badge-off">enabled</span>{% else %}<span class="badge-on">disabled</span>{% endif %}</td>
+  <td>{% if r.kill_switch %}<span class="badge-on">ON</span>{% else %}<span class="badge-off">off</span>{% endif %}</td>
+  <td>{{ r.calls_today or 0 }}</td>
+  <td>${{ "%.4f"|format(r.known_spend_today) }}</td>
+  <td>{{ r.last_call_at.strftime("%Y-%m-%d %H:%M UTC") if r.last_call_at else "—" }}</td>
+  <td>
+    <details>
+      <summary>Manage</summary>
+      <form method="post" action="/console/fleet/toggle" class="inline"
+            onsubmit="return confirm('{{ 'Turn OFF' if r.kill_switch else 'Turn ON' }} the kill switch for {{ r.tenant_slug }}/{{ r.channel }}?');">
+        <input type="hidden" name="csrf_token" value="{{ session }}">
+        <input type="hidden" name="tenant_slug" value="{{ r.tenant_slug }}">
+        <input type="hidden" name="channel" value="{{ r.channel }}">
+        <input type="hidden" name="field" value="kill_switch">
+        <input type="hidden" name="on" value="{{ 'false' if r.kill_switch else 'true' }}">
+        <button type="submit">{{ 'Turn kill switch off' if r.kill_switch else 'Turn kill switch on' }}</button>
+      </form>
+      <form method="post" action="/console/fleet/toggle" class="inline"
+            onsubmit="return confirm('{{ 'Disable' if r.is_enabled else 'Enable' }} {{ r.tenant_slug }}/{{ r.channel }}?');">
+        <input type="hidden" name="csrf_token" value="{{ session }}">
+        <input type="hidden" name="tenant_slug" value="{{ r.tenant_slug }}">
+        <input type="hidden" name="channel" value="{{ r.channel }}">
+        <input type="hidden" name="field" value="is_enabled">
+        <input type="hidden" name="on" value="{{ 'false' if r.is_enabled else 'true' }}">
+        <button type="submit">{{ 'Disable channel' if r.is_enabled else 'Enable channel' }}</button>
+      </form>
+    </details>
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% endblock %}

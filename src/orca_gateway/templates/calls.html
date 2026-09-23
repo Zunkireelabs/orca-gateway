@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Calls — Orca console{% endblock %}
+{% block content %}
+<h1>Calls</h1>
+<p class="sub">Filter by tenant and date, newest first.</p>
+<form method="get" action="/console/calls" class="filters">
+  <select name="tenant_slug">
+    <option value="">All tenants</option>
+    {% for t in tenants %}
+    <option value="{{ t }}" {% if t == tenant_slug %}selected{% endif %}>{{ t }}</option>
+    {% endfor %}
+  </select>
+  <input type="text" name="date" placeholder="YYYY-MM-DD" value="{{ on_date or '' }}">
+  <button type="submit">Filter</button>
+</form>
+<table>
+<thead><tr>
+  <th>Time (UTC)</th><th>Tenant</th><th>Channel</th><th>Duration</th><th>Turns</th>
+  <th>Ended reason</th><th>Known cost</th><th>Abandoned</th><th>Label</th>
+</tr></thead>
+<tbody>
+{% for c in rows %}
+<tr>
+  <td><a href="/console/calls/{{ c.id }}">{{ c.started_at.strftime("%Y-%m-%d %H:%M:%S") }}</a>
+    {% if c.overstated %}<div class="flag">pre-metering-fix</div>{% endif %}</td>
+  <td>{{ c.tenant_slug }}</td>
+  <td>{{ c.channel }}</td>
+  <td>{% if c.ended_at %}{{ ((c.ended_at - c.started_at).total_seconds())|int }}s{% else %}<span class="muted">open</span>{% endif %}</td>
+  <td>{{ c.turn_count }}</td>
+  <td>{{ c.ended_reason or "—" }}</td>
+  <td>{% if c.llm_cost_usd is not none %}${{ "%.4f"|format(c.llm_cost_usd) }}{% else %}<span class="muted">unknown</span>{% endif %}</td>
+  <td>{{ c.abandoned_run_count }}</td>
+  <td>{% if c.label %}<span class="pill pill-{{ c.label }}">{{ c.label }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+</tr>
+{% else %}
+<tr><td colspan="9" class="muted">No calls match this filter.</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endblock %}
