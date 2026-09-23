@@ -268,6 +268,36 @@ async def test_arrival_log_marks_a_different_text_after_the_answer_as_joined_aft
     assert hashes[0] != hashes[1] and "clear final" not in caplog.text
 
 
+def _legs(caplog) -> list[dict]:
+    """Parse the diagnostic timing log lines (latency breakdown brief §1) into dicts."""
+    out = []
+    for m in caplog.messages:
+        if m.startswith("voice latency leg="):
+            out.append(dict(p.split("=", 1) for p in m.split()[2:]))
+    return out
+
+
+async def test_latency_legs_are_logged_in_order_for_a_completed_turn(wired, caplog):
+    with caplog.at_level(logging.INFO, logger=ARRIVAL_LOGGER):
+        r = await _post()
+    assert r.status_code == 200
+
+    legs = _legs(caplog)
+    assert [x["leg"] for x in legs] == [
+        "dispatch",
+        "backend_response_received",
+        "first_audio_sent",
+    ]
+    for x in legs:
+        assert x["conversation"] == TRACE
+        assert x["depth"] == "3"
+        assert x["span"] == "8a2e73c1d4f50b96"
+        float(x["mono"])  # a monotonic timestamp, parseable
+    # monotonically non-decreasing, in the order the gateway actually does the work
+    monos = [float(x["mono"]) for x in legs]
+    assert monos == sorted(monos)
+
+
 async def test_numbers_in_the_final_answer_are_spoken_as_words(wired, caplog):
     wired.events = [
         TurnEvent(type="token", data={"text": "provisional 5"}),
