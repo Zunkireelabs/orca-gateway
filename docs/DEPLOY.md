@@ -64,7 +64,7 @@ the same name). Generate the voice secret as **hex** (`openssl rand -hex 32`): i
 | Var | Value | Note |
 |---|---|---|
 | `ORCA_DATABASE_URL` | secret | Postgres holding tenant config (schema `orca_gw`). Use the Supabase **session-mode pooler** URL with `sslmode=require` (GitHub runners are IPv4-only and the direct host is IPv6-only; transaction-mode pooling breaks the migration advisory lock). Percent-encode the password. |
-| `ORCA_VOICE_MAX_CONCURRENT_RUNS` | `1` | **Do not raise.** Zunkiree stage has a 2-socket pool sharing a ceiling with PROD. Never load-test. |
+| `ORCA_VOICE_MAX_CONCURRENT_RUNS` | `2` | P3 brief D2, raised from 1: B0 showed warm clinic turns hold ~0 DB sockets, so Zunkiree stage's 2-socket pool was never actually the ceiling this env var protected -- it protects against something that doesn't happen. Chat and voice now share this one ceiling (P3 A1). Never load-test. |
 | `ORCA_VOICE_RUN_TIMEOUT_S` | `25.0` | |
 
 **Run exactly one uvicorn worker** (the Dockerfile and compose pin `--workers 1`). Turn de-duplication and

@@ -8,7 +8,7 @@ from fastapi import FastAPI
 
 from orca_gateway import deps
 from orca_gateway import sweep as sweep_module
-from orca_gateway.channels import elevenlabs_llm
+from orca_gateway.channels import elevenlabs_llm, widget_chat
 from orca_gateway.config import get_settings
 from orca_gateway.console import router as console_router
 from orca_gateway.tenants import TenantStoreError
@@ -57,6 +57,11 @@ app = FastAPI(
     title="orca-gateway", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
 )
 app.include_router(elevenlabs_llm.router)
+# P3 brief A1: the widget's chat stream, a second thin channel adapter. Public/anonymous -- its
+# own auth is the tenant's allowed_origins allowlist (checked inside the router), not a shared
+# secret (never in a browser-shipped page). Traefik must route POST/OPTIONS /v1/widget/stream to
+# this service (docker-compose.yml), same convention as /chat/completions.
+app.include_router(widget_chat.router)
 # The console (S6 PR 2). Auth is enforced inside the router (console_auth.require_session), not
 # by omission here: every /console/* route depends on a valid session cookie, never 200 without
 # one. Traefik must also route /console/* to this service (docker-compose.yml) -- the public

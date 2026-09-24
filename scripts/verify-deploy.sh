@@ -46,6 +46,24 @@ rejected "GET /chat/completions"    "$(code "$URL/chat/completions")"
 rejected "PUT /chat/completions"    "$(code -X PUT "$URL/chat/completions" -d '{}')"
 rejected "DELETE /chat/completions" "$(code -X DELETE "$URL/chat/completions")"
 rejected "POST /health"             "$(code -X POST "$URL/health" -d '{}')"
+# P3 brief A2: POST/OPTIONS /v1/widget/stream is the widget's public chat route -- every other
+# method must be rejected at the proxy, same as the checks above.
+rejected "GET /v1/widget/stream"    "$(code "$URL/v1/widget/stream")"
+rejected "PUT /v1/widget/stream"    "$(code -X PUT "$URL/v1/widget/stream" -d '{}')"
+# A disallowed Origin is rejected by the APP (no tenant's allowed_origins list has this origin --
+# it's not a real site), never reaching a backend: 403, with no CORS header on the response (a
+# real listed origin would get one; asserting its absence here is the actual safety property).
+disallowed_origin_headers=$(curl -s -D- -o /dev/null -m 10 -X POST "$URL/v1/widget/stream" \
+  -H 'origin: https://not-a-real-tenant-origin.example.com' \
+  -H 'content-type: application/json' \
+  -d '{"site_id":"verify-deploy-probe","question":"x","session_id":"verify-deploy-probe"}')
+disallowed_origin_code=$(printf '%s' "$disallowed_origin_headers" | head -1 | tr -dc '0-9')
+check "POST /v1/widget/stream disallowed origin" 403 "$disallowed_origin_code"
+if printf '%s' "$disallowed_origin_headers" | grep -qi '^access-control-allow-origin:'; then
+  echo "::error::disallowed Origin got a CORS header on /v1/widget/stream"; fail=1
+else
+  echo "OK  disallowed Origin -> no access-control-allow-origin header"
+fi
 # HEAD does not match Method(`GET`) either, so it is rejected too. Deliberate evidence that the
 # method filter works (and the reason HSTS below must be read from a GET).
 rejected "HEAD /health"             "$(code -I "$URL/health")"

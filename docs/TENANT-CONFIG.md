@@ -10,18 +10,20 @@ backend, not here.
 | Table | Holds |
 |---|---|
 | `tenants` | `slug` (the stable handle), `display_name` (a label), `is_active`, `timezone` (IANA), `backend` (`zunkiree`), `backend_config` (the ONLY place a backend's vocabulary lives: `{site_id, base_url}`) |
-| `tenant_channels` | one row per (tenant, channel `voice`/`chat`): `is_enabled`, `agent_id`, `languages`, `default_language`, `voice_id`, `spoken_brand_name`, `handoff_target`, `handoff_hours`, `out_of_hours_behaviour`, `out_of_hours_message`, `escalation_policy`/`_instruction`, `closed_dates`, `closed_weekdays`, caps, `kill_switch` |
+| `tenant_channels` | one row per (tenant, channel `voice`/`chat`): `is_enabled`, `agent_id`, `languages`, `default_language`, `voice_id`, `spoken_brand_name`, `handoff_target`, `handoff_hours`, `out_of_hours_behaviour`, `out_of_hours_message`, `escalation_policy`/`_instruction`, `closed_dates`, `closed_weekdays`, caps, `allowed_origins`, `kill_switch` |
 
 ## What the gateway enforces today, and what it only stores
 
 | Field | Status |
 |---|---|
 | `backend_config`, `agent_id` | **Enforced**: each tenant reaches its own brain |
-| `is_active`, `is_enabled`, `kill_switch` | **Enforced**, fail closed (403), backend never called |
+| `is_active`, `is_enabled`, `kill_switch` | **Enforced**, fail closed (chat: a 200 SSE `error` frame; voice: 403), backend never called |
 | `closed_dates`, `closed_weekdays`, `handoff_hours` + `out_of_hours_behaviour = say_closed` | **Enforced**: the gateway answers `out_of_hours_message` (`{brand}` -> `spoken_brand_name`) without calling the backend |
-| `out_of_hours_behaviour = take_message` / `handoff_anyway` | **Stored; behaves as pass-through.** Acting on them needs the agent to receive channel context, which the seam does not carry yet |
+| `out_of_hours_behaviour = take_message` / `handoff_anyway` (the default) | **Stored; behaves as pass-through** ("answer anyway"). Acting on them needs the agent to receive channel context, which the seam does not carry yet |
 | `voice_id`, `languages`, `default_language` | **Stored** as config of record for provisioning; the voice platform chooses the voice, not the gateway |
-| `escalation_*`, `handoff_target`, `max_session_seconds`, `daily_spend_cap`, `per_caller_rate_limit` | **Stored**; enforced by later slices (metering) |
+| `allowed_origins` | **Enforced for `chat` only** (P3 brief A2): `POST /v1/widget/stream` rejects (403, no CORS header) any request whose `Origin` isn't listed, before any backend call. Stored but unused for `voice`, which has no browser origin |
+| `per_caller_rate_limit` | **Enforced for `chat` only** (P3 brief A2): turns per rolling minute, checked per `session_id` and per client IP independently. Stored but unenforced for `voice` |
+| `escalation_*`, `handoff_target`, `max_session_seconds`, `daily_spend_cap` | **Stored**; enforced by later slices (metering) |
 
 ## `closed_dates` / `closed_weekdays` are a STOPGAP
 

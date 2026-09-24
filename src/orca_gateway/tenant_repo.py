@@ -16,7 +16,7 @@ _CHANNEL_COLS = (
     "spoken_brand_name, handoff_target, handoff_hours, out_of_hours_behaviour, "
     "out_of_hours_message, escalation_policy, escalation_instruction, closed_dates, "
     "closed_weekdays, max_session_seconds, daily_spend_cap, per_caller_rate_limit, "
-    "max_concurrent_runs, kill_switch"
+    "max_concurrent_runs, kill_switch, allowed_origins"
 )
 
 
@@ -256,7 +256,7 @@ class PgTenantRepository:
         await conn.execute(
             f"insert into orca_gw.tenant_channels (tenant_id, {_CHANNEL_COLS}) values "
             "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-            "%s, %s) "
+            "%s, %s, %s) "
             "on conflict (tenant_id, channel) do update set "
             + ", ".join(f"{c.strip()} = excluded.{c.strip()}" for c in _CHANNEL_COLS.split(",")[1:])
             + ", updated_at = now()",
@@ -283,5 +283,6 @@ class PgTenantRepository:
                 ch.per_caller_rate_limit,
                 ch.max_concurrent_runs,
                 ch.kill_switch,
+                ch.allowed_origins,
             ),
         )
