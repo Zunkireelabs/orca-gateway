@@ -14,11 +14,11 @@ import logging
 from dataclasses import dataclass
 from datetime import date
 
-import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from orca_gateway.cost import cost_usd
+from orca_gateway.db_schema import connection_class, validate_schema
 
 logger = logging.getLogger("orca_gateway.calls_repo")
 
@@ -35,12 +35,15 @@ class CallState:
 
 
 class PgCallsRepository:
-    def __init__(self, database_url: str, *, connect_timeout: int = 5) -> None:
+    def __init__(
+        self, database_url: str, *, schema: str = "orca_gw", connect_timeout: int = 5
+    ) -> None:
         self._url = database_url
+        self._schema = validate_schema(schema)
         self._connect_timeout = connect_timeout
 
     def _connect(self):
-        return psycopg.AsyncConnection.connect(
+        return connection_class(self._schema).connect(
             self._url,
             autocommit=True,
             prepare_threshold=None,

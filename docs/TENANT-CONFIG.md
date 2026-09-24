@@ -1,7 +1,8 @@
 # Tenant config
 
-A tenant is **data**. Two tenants differ by rows in Postgres schema `orca_gw`, never by code. The schema
-of record is `migrations/0001_tenants.sql`; nothing is ever created in `public`.
+A tenant is **data**. Two tenants differ by rows in Postgres schema `orca_gw` (`ORCA_DB_SCHEMA`, default
+`orca_gw`; prod uses `orca_gw_prod` on the same project -- P2 brief D2), never by code. The schema of
+record is `migrations/0001_tenants.sql`; nothing is ever created in `public`.
 
 **Test for any field:** would a spa, a school or a dealership have it too? If not, it belongs in the
 backend, not here.

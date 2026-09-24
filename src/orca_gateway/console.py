@@ -47,7 +47,7 @@ def _reporting() -> Reporting:
     settings = get_settings()
     if not settings.database_url:
         raise HTTPException(503, "console database not configured")
-    return Reporting(settings.database_url)
+    return Reporting(settings.database_url, schema=settings.db_schema)
 
 
 def _cookie_kwargs() -> dict:

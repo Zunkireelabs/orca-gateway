@@ -18,5 +18,9 @@ def pg_url():
         pytest.skip("ORCA_TEST_DATABASE_URL not set")
     with psycopg.connect(url, autocommit=True) as conn:
         conn.execute("drop schema if exists orca_gw cascade")
+        # orca_gw_prod: the second schema a handful of tests (test_db_schema.py) migrate into,
+        # on the same database as orca_gw. Dropped here too, so a leftover from a previous run
+        # can never make one of those tests pass by finding the work already done.
+        conn.execute("drop schema if exists orca_gw_prod cascade")
     migrate(url, MIGRATIONS)
     return url
