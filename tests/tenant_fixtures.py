@@ -19,6 +19,18 @@ def voice(**over) -> ChannelConfig:
     return ChannelConfig(**base)
 
 
+def chat(**over) -> ChannelConfig:
+    base = dict(
+        channel="chat",
+        languages=["ne", "en"],
+        default_language="ne",
+        spoken_brand_name="डेन्टल सिटी",
+        allowed_origins=["https://widget.example.com"],
+    )
+    base.update(over)
+    return ChannelConfig(**base)
+
+
 def dental_city() -> TenantConfig:
     return TenantConfig(
         slug="dental-city",

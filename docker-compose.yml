@@ -31,7 +31,11 @@ services:
       start_period: 15s
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.orca-gw-stage.rule=Host(`orca-gw-stage.zunkireelabs.com`) && ((Method(`POST`) && Path(`/chat/completions`)) || (Method(`GET`) && Path(`/health`)))"
+      # P3 brief A2: POST /v1/widget/stream (the chat widget adapter) and its OPTIONS preflight,
+      # added deliberately, in review, same as every other route here. The route's own auth is the
+      # tenant's allowed_origins allowlist, enforced inside the app -- this only lets the traffic
+      # through, same convention as /chat/completions below.
+      - "traefik.http.routers.orca-gw-stage.rule=Host(`orca-gw-stage.zunkireelabs.com`) && ((Method(`POST`) && Path(`/chat/completions`)) || (Method(`GET`) && Path(`/health`)) || ((Method(`POST`) || Method(`OPTIONS`)) && Path(`/v1/widget/stream`)))"
       - "traefik.http.routers.orca-gw-stage.entrypoints=websecure"
       - "traefik.http.routers.orca-gw-stage.tls.certresolver=letsencrypt"
       # HSTS — force HTTPS for ~1 year after first secure visit
@@ -67,7 +71,8 @@ services:
       start_period: 15s
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.orca-gw-prod.rule=Host(`orca-gw.zunkireelabs.com`) && ((Method(`POST`) && Path(`/chat/completions`)) || (Method(`GET`) && Path(`/health`)))"
+      # P3 brief A2: mirrors stage's allowlist above, added to both environments deliberately.
+      - "traefik.http.routers.orca-gw-prod.rule=Host(`orca-gw.zunkireelabs.com`) && ((Method(`POST`) && Path(`/chat/completions`)) || (Method(`GET`) && Path(`/health`)) || ((Method(`POST`) || Method(`OPTIONS`)) && Path(`/v1/widget/stream`)))"
       - "traefik.http.routers.orca-gw-prod.entrypoints=websecure"
       - "traefik.http.routers.orca-gw-prod.tls.certresolver=letsencrypt"
       - "traefik.http.middlewares.hsts-orca-gw-prod.headers.stsSeconds=31536000"

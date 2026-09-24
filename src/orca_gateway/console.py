@@ -328,10 +328,12 @@ async def config_index(request: Request, session: str = Depends(require_session)
     )
 
 
-# P2 brief A5 follow-up: per-environment ceilings, by channel. Only "voice" has one today
-# (ORCA_VOICE_MAX_CONCURRENT_RUNS); a future channel's own setting is added here, never guessed.
+# P2 brief A5 follow-up: per-environment ceilings, by channel. voice and chat share the ONE
+# ORCA_VOICE_MAX_CONCURRENT_RUNS ceiling (P3 brief A1/D2 -- the env var's name is historical, not
+# voice-only); a channel with its own, separate ceiling is added here, never guessed.
 def _environment_ceiling(channel: str) -> int | None:
-    return {"voice": get_settings().voice_max_concurrent_runs}.get(channel)
+    ceiling = get_settings().voice_max_concurrent_runs
+    return {"voice": ceiling, "chat": ceiling}.get(channel)
 
 
 def _concurrency_summary(tenants: list[dict]) -> list[dict]:
@@ -448,6 +450,9 @@ async def config_save(
             daily_spend_cap=_float("daily_spend_cap"),
             per_caller_rate_limit=_int("per_caller_rate_limit"),
             max_concurrent_runs=_int("max_concurrent_runs"),
+            allowed_origins=[
+                o.strip() for o in (form.get("allowed_origins") or "").split(",") if o.strip()
+            ],
         )
         # Validate the WHOLE form (both writes) before touching the database: update_channel_config
         # validates again internally, but that is after update_tenant_timezone would already have

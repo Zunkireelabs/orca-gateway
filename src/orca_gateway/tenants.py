@@ -53,6 +53,11 @@ class ChannelConfig(BaseModel):
     # enforced by its own semaphore, keyed on (tenant, channel), never shared with any other key.
     max_concurrent_runs: int | None = Field(default=None, gt=0)
     kill_switch: bool = False
+    # P3 brief A2: the browser origins a public, anonymous channel (chat) will answer. Empty =
+    # nothing is allowed yet (fail closed, never "allow everything" by omission). Any channel may
+    # carry this column -- only chat's adapter enforces it today, the same "stored for every
+    # channel, enforced where it applies" pattern as every other cap above.
+    allowed_origins: list[str] = Field(default_factory=list)
 
     @field_validator("closed_weekdays")
     @classmethod

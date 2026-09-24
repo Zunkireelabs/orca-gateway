@@ -233,8 +233,10 @@ jobs:
               printf 'ORCA_VOICE_SHARED_SECRET=%s\n' "$ORCA_VOICE_SHARED_SECRET"
               printf 'ORCA_DATABASE_URL=%s\n' "$ORCA_DATABASE_URL"
               printf 'ORCA_CONSOLE_SECRET=%s\n' "$ORCA_CONSOLE_SECRET"
-              # Zunkiree stage has a 2-socket pool sharing a ceiling with PROD. Do not raise.
-              echo "ORCA_VOICE_MAX_CONCURRENT_RUNS=1"
+              # P3 brief D2, raised from 1: B0 showed warm clinic turns hold ~0 DB sockets, so
+              # Zunkiree stage's 2-socket pool was never actually the ceiling this protected.
+              # Chat and voice now share this one ceiling (P3 A1). Never load-test.
+              echo "ORCA_VOICE_MAX_CONCURRENT_RUNS=2"
               echo "ORCA_VOICE_RUN_TIMEOUT_S=25.0"
             } > .env
             chmod 600 .env

@@ -81,6 +81,7 @@ def _to_turn_event(event: dict) -> TurnEvent:
             data={
                 "answer": event.get("answer", ""),
                 "sources": event.get("sources", []),
+                "suggestions": event.get("suggestions", []),
             },
         )
     if event_type == "tool_call":

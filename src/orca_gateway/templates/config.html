@@ -122,11 +122,20 @@
 <input type="number" name="max_session_seconds" value="{{ ch.max_session_seconds or '' }}">
 <label>Daily spend cap (USD)</label>
 <input type="number" step="0.01" name="daily_spend_cap" value="{{ ch.daily_spend_cap if ch.daily_spend_cap is not none else '' }}">
-<label>Per-caller rate limit <span class="not-enforced">(stored, not enforced)</span></label>
+<label>Per-caller rate limit <span class="not-enforced">{% if channel == 'chat' %}(enforced: turns per minute, per session_id and per client IP){% else %}(stored, not enforced){% endif %}</span></label>
 <input type="number" name="per_caller_rate_limit" value="{{ ch.per_caller_rate_limit or '' }}">
 <label>Max concurrent runs</label>
 <input type="number" min="1" name="max_concurrent_runs" value="{{ ch.max_concurrent_runs or '' }}">
 <div class="field-note">This tenant's own cap on runs in flight at once, under the environment ceiling. Blank = no cap of its own.</div>
+</fieldset>
+
+<fieldset>
+<legend>Public endpoint (chat)</legend>
+<label>Allowed origins <span class="field-note">comma-separated, e.g. https://tenant-site.example.com,https://demo.zunkireelabs.com</span></label>
+<input type="text" name="allowed_origins" value="{{ ch.allowed_origins|join(',') }}">
+<div class="field-note">POST /v1/widget/stream (chat only) rejects any request whose Origin
+  header is not in this list, before calling the backend, and emits CORS headers only for a
+  listed origin. Empty = the widget cannot reach this tenant's chat channel at all.</div>
 </fieldset>
 
 <div class="actions"><button class="primary" type="submit">Save</button></div>

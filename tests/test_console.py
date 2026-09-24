@@ -293,9 +293,22 @@ def test_concurrency_summary_flags_over_ceiling_even_with_every_tenant_capped(mo
     get_settings.cache_clear()
 
 
-def test_concurrency_summary_has_no_ceiling_for_a_channel_without_an_environment_setting():
-    # "chat" has no ORCA_..._MAX_CONCURRENT_RUNS setting today; never fabricate one.
+def test_concurrency_summary_chat_shares_voices_environment_ceiling(monkeypatch):
+    # P3 brief A1/D2: chat and voice share the ONE ORCA_VOICE_MAX_CONCURRENT_RUNS ceiling (the
+    # env var's name is historical) -- never a fabricated, separate number for chat.
+    monkeypatch.setenv("ORCA_VOICE_MAX_CONCURRENT_RUNS", "2")
+    get_settings.cache_clear()
     tenants = [_tenant_row({"channel": "chat", "max_concurrent_runs": None})]
+    summary = _concurrency_summary(tenants)[0]
+    assert summary["ceiling"] == 2
+    assert summary["over_ceiling"] is False  # nothing configured to be over it
+    get_settings.cache_clear()
+
+
+def test_concurrency_summary_has_no_ceiling_for_a_channel_without_an_environment_setting():
+    # A genuinely unconfigured channel (no ORCA_..._MAX_CONCURRENT_RUNS mapping at all) still
+    # never fabricates a ceiling.
+    tenants = [_tenant_row({"channel": "some-future-channel", "max_concurrent_runs": None})]
     summary = _concurrency_summary(tenants)[0]
     assert summary["ceiling"] is None
     assert summary["over_ceiling"] is False  # nothing to be over without a known ceiling
