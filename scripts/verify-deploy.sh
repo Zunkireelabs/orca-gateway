@@ -29,18 +29,47 @@ check() { # name expected actual
 # "Rejected at the proxy" is the property that matters, not which code a given Traefik version
 # emits. Production runs Traefik v2.11, which answers 405 (empty body) when a router matches the
 # PATH but not the METHOD, where v3 answers 404. Do NOT "fix" these back to 404-only: the 405 is
-# the method filter working.
+# the method filter working. This also covers paths no router's Path() clause names at all
+# (/docs, /openapi.json, /v1/turn, /): with the whole allowlist expressed as one compound rule
+# (Method(...) && Path(...)) || (...), v2.11 answers those the same way it answers a matched-path
+# wrong-method request -- 405, not 404 -- once the rule has more than one clause. v3 still answers
+# 404 for these. Do not split them back into a 404-only `check`: that's asserting a Traefik
+# version, not "rejected at the proxy".
 rejected() { # name actual
   case "$2" in 404|405) echo "OK  $1 -> $2 (rejected at proxy)" ;;
     *) echo "::error::$1 expected 404 or 405 got $2"; fail=1 ;; esac
 }
-code() { curl -s -o /dev/null -m 10 -w '%{http_code}' "$@"; }
+# A reload (new container swapped in behind the same Traefik) can produce a transient 000
+# (connection refused/reset) for a few seconds. Retry on 000 the same way the /health loop above
+# already waits out ACME -- an assertion during that window is a false failure, not a real one.
+code() { # curl args...
+  local out i
+  for i in $(seq 1 10); do
+    out=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "$@")
+    [ "$out" = "000" ] || { printf '%s' "$out"; return; }
+    sleep 2
+  done
+  printf '%s' "$out"
+}
+# Same 000-retry, for the two spots that need the full header dump rather than just the status
+# code (disallowed-origin CORS headers, HSTS).
+curl_headers() { # curl args (a -D- -o /dev/null dump)...
+  local out st i
+  for i in $(seq 1 10); do
+    out=$(curl -s -D- -o /dev/null -m 10 "$@")
+    st=$(printf '%s' "$out" | head -1 | tr -dc '0-9')
+    [ "$st" = "000" ] || { printf '%s' "$out"; return; }
+    sleep 2
+  done
+  printf '%s' "$out"
+}
 
-# No router matches these at all, so every Traefik version answers 404.
-check "GET /docs"            404 "$(code "$URL/docs")"
-check "GET /openapi.json"    404 "$(code "$URL/openapi.json")"
-check "POST /v1/turn"        404 "$(code -X POST "$URL/v1/turn" -d '{}')"
-check "GET /"                404 "$(code "$URL/")"
+# No router's Path() clause names these, so they are rejected at the proxy too -- 404 (v3) or
+# 405 (v2.11, once the router rule has more than one alternative; see the comment on `rejected`).
+rejected "GET /docs"            "$(code "$URL/docs")"
+rejected "GET /openapi.json"    "$(code "$URL/openapi.json")"
+rejected "POST /v1/turn"        "$(code -X POST "$URL/v1/turn" -d '{}')"
+rejected "GET /"                "$(code "$URL/")"
 # Path matches an allowed route, method does not: 404 (v3) or 405 (v2.11).
 rejected "GET /chat/completions"    "$(code "$URL/chat/completions")"
 rejected "PUT /chat/completions"    "$(code -X PUT "$URL/chat/completions" -d '{}')"
@@ -53,7 +82,7 @@ rejected "PUT /v1/widget/stream"    "$(code -X PUT "$URL/v1/widget/stream" -d '{
 # A disallowed Origin is rejected by the APP (no tenant's allowed_origins list has this origin --
 # it's not a real site), never reaching a backend: 403, with no CORS header on the response (a
 # real listed origin would get one; asserting its absence here is the actual safety property).
-disallowed_origin_headers=$(curl -s -D- -o /dev/null -m 10 -X POST "$URL/v1/widget/stream" \
+disallowed_origin_headers=$(curl_headers -X POST "$URL/v1/widget/stream" \
   -H 'origin: https://not-a-real-tenant-origin.example.com' \
   -H 'content-type: application/json' \
   -d '{"site_id":"verify-deploy-probe","question":"x","session_id":"verify-deploy-probe"}')
@@ -74,7 +103,7 @@ check "POST /chat/completions wrong bearer" 401 "$(code -X POST "$URL/chat/compl
   -d '{"stream":true,"messages":[{"role":"user","content":"x"}]}')"
 # Read HSTS from a real GET. `curl -I` sends HEAD, which does not match the router, so its
 # middleware never runs and the header is absent: a false negative.
-if curl -s -D- -o /dev/null -m 10 "$URL/health" | grep -qi '^strict-transport-security:'; then
+if curl_headers "$URL/health" | grep -qi '^strict-transport-security:'; then
   echo "OK  HSTS present (GET /health)"
 else
   echo "::error::HSTS header missing on GET /health"; fail=1
