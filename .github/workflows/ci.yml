@@ -32,5 +32,12 @@ jobs:
       - run: uv run python -m orca_gateway.migrate --bootstrap config/bootstrap-tenants
         env:
           ORCA_DATABASE_URL: postgresql://postgres:test@localhost:5432/orca
+      # Prod's bootstrap file, into its own schema on the SAME throwaway database -- so a bad
+      # config/bootstrap-tenants-prod/*.json (fails TenantConfig validation) is caught at PR time,
+      # not on the real prod migrate.
+      - run: uv run python -m orca_gateway.migrate --bootstrap config/bootstrap-tenants-prod
+        env:
+          ORCA_DATABASE_URL: postgresql://postgres:test@localhost:5432/orca
+          ORCA_DB_SCHEMA: orca_gw_prod
       - run: uv run pytest -rs
       - run: docker build -t orca-gateway:ci .

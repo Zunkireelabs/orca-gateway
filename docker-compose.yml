@@ -1,12 +1,21 @@
-# orca-gateway (stage). CI passes IMAGE_TAG=<full sha>; the VPS pulls, never builds.
+# orca-gateway: stage and prod, as two independent targets of the same pipeline (P2 brief A1).
+# Each is deployed from its OWN checkout directory on the VPS (see deploy.yml), so `docker compose
+# up -d --force-recreate <service>` from either checkout only ever touches its own container --
+# both services being listed in the same file (checked out twice) is what "next to stage, same
+# pipeline" means here, not a shared deploy. CI passes IMAGE_TAG=<full sha>; the VPS pulls, never
+# builds. The two deploys reuse the one IMAGE_TAG var name (each sets it fresh, immediately before
+# its own `up -d --force-recreate <its-own-service>`), same as today -- the other service's config
+# is parsed but never applied.
 #
-# PUBLIC SURFACE = `POST /chat/completions`, `GET /health`, and (S6) everything under `/console`
-# -- which is its OWN router below, PII-bearing and gated by its own auth (console_auth.py), never
-# by omission here. Enforced in Traefik and not only in the app: this allowlist is what keeps any
-# future accidental route (e.g. an unauthenticated entry point) from being reachable.
+# PUBLIC SURFACE (both environments) = `POST /chat/completions`, `GET /health`, and (S6) everything
+# under `/console` -- which is its OWN router below, PII-bearing and gated by its own auth
+# (console_auth.py), never by omission here. Enforced in Traefik and not only in the app: this
+# allowlist is what keeps any future accidental route (e.g. an unauthenticated entry point) from
+# being reachable.
 #
-# Run exactly ONE uvicorn worker. Turn de-duplication and the global backend-run cap live in
-# process memory; a second worker would silently split them.
+# Run exactly ONE uvicorn worker, in BOTH environments. Turn de-duplication and the global
+# backend-run cap live in process memory; a second worker would silently split them. Prod raises
+# ORCA_VOICE_MAX_CONCURRENT_RUNS (via .env, not here -- see docs/DEPLOY.md), never the worker count.
 services:
   orca-gateway-stage:
     image: ghcr.io/zunkireelabs/orca-gateway:${IMAGE_TAG:?IMAGE_TAG must be set}
@@ -37,6 +46,38 @@ services:
       - "traefik.http.routers.orca-gw-stage-console.tls.certresolver=letsencrypt"
       - "traefik.http.routers.orca-gw-stage-console.middlewares=hsts-orca-gw-stage"
       - "traefik.http.routers.orca-gw-stage-console.service=orca-gw-stage"
+    networks:
+      - hosting
+
+  # P2 brief D3: same hostname pattern as stage, without "-stage". Deploys ONLY via
+  # workflow_dispatch with an explicit sha (deploy.yml) -- never on push. Its .env carries its own
+  # PROD_-prefixed secrets (D6: never copied from stage), ORCA_DB_SCHEMA=orca_gw_prod (D2) and
+  # ORCA_VOICE_MAX_CONCURRENT_RUNS=5 (A2); nothing about that lives in this file.
+  orca-gateway-prod:
+    image: ghcr.io/zunkireelabs/orca-gateway:${IMAGE_TAG:?IMAGE_TAG must be set}
+    container_name: orca-gateway-prod
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.orca-gw-prod.rule=Host(`orca-gw.zunkireelabs.com`) && ((Method(`POST`) && Path(`/chat/completions`)) || (Method(`GET`) && Path(`/health`)))"
+      - "traefik.http.routers.orca-gw-prod.entrypoints=websecure"
+      - "traefik.http.routers.orca-gw-prod.tls.certresolver=letsencrypt"
+      - "traefik.http.middlewares.hsts-orca-gw-prod.headers.stsSeconds=31536000"
+      - "traefik.http.routers.orca-gw-prod.middlewares=hsts-orca-gw-prod"
+      - "traefik.http.services.orca-gw-prod.loadbalancer.server.port=8000"
+      - "traefik.http.routers.orca-gw-prod-console.rule=Host(`orca-gw.zunkireelabs.com`) && PathPrefix(`/console`)"
+      - "traefik.http.routers.orca-gw-prod-console.entrypoints=websecure"
+      - "traefik.http.routers.orca-gw-prod-console.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.orca-gw-prod-console.middlewares=hsts-orca-gw-prod"
+      - "traefik.http.routers.orca-gw-prod-console.service=orca-gw-prod"
     networks:
       - hosting
 
