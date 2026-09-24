@@ -59,6 +59,13 @@ jobs:
     env:
       ORCA_TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/orca
     steps:
+      - name: Reject a malformed sha before anything uses it
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          sha="${{ github.event.inputs.sha }}"
+          echo "$sha" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "::error::sha input must be exactly 40 lowercase hex characters, got '$sha'"
+            exit 1; }
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.sha || github.sha }}

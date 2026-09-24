@@ -145,8 +145,11 @@ pilot agent's Custom LLM URL back to stage**, place a call, confirm it answers, 
 forward again. This is the rollback that matters — it doesn't touch this deploy pipeline at all.
 
 Pipeline-level: re-dispatch with the previous good sha —
-`gh workflow run deploy.yml -f sha=<previous-full-sha>`. Emergency (on the VPS): same pin pattern
-as stage, against the prod checkout and container:
+`gh workflow run deploy.yml -f sha=<previous-full-sha>`. **Only shas from this PR onward can be
+dispatched** — `deploy.yml`'s `checks` job rejects any `sha` input that isn't exactly 40 lowercase
+hex characters before any step uses it, so a short, uppercase, or otherwise malformed sha (from a
+pre-PR habit or a copy/paste slip) fails fast instead of silently resolving to the wrong ref.
+Emergency (on the VPS): same pin pattern as stage, against the prod checkout and container:
 
 ```bash
 cd /home/zunkireelabs/devprojects/orca-gateway-prod

@@ -46,6 +46,15 @@ def test_connection_class_is_the_plain_class_for_the_default_schema():
     assert connection_class("orca_gw") is psycopg.AsyncConnection
 
 
+def test_connection_class_refuses_cursor_so_it_cannot_bypass_the_rewrite():
+    # .cursor()'s own .execute() never goes through this class's rewrite -- a future cursor-based
+    # query would quietly hit orca_gw (stage's schema) instead of orca_gw_prod. Refuse it outright.
+    conn_cls = connection_class("orca_gw_prod")
+    conn = conn_cls.__new__(conn_cls)  # never actually connects
+    with pytest.raises(NotImplementedError):
+        conn.cursor()
+
+
 def test_migrating_a_second_schema_never_touches_the_first(pg_url):
     # pg_url already migrated orca_gw from empty (tests/conftest.py). Migrate a second schema on
     # the SAME database and prove the first is untouched.
