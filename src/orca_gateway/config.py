@@ -21,19 +21,16 @@ class Settings(BaseSettings):
     # `orca_gw` (stage's schema, unchanged); prod sets `orca_gw_prod`. Validated as a plain
     # identifier here -- fail at startup, not on the first query.
     db_schema: str = "orca_gw"
-
-    @field_validator("db_schema")
-    @classmethod
-    def _validate_db_schema(cls, v: str) -> str:
-        return validate_schema(v)
     # A config edit takes effect within this many seconds unless invalidated explicitly.
     tenant_cache_ttl_s: float = 15.0
 
     # Voice channel adapter. All required at runtime; the route fails closed if unset.
     voice_shared_secret: str = ""
     voice_debounce_ms: int = 300
-    # Max backend runs in flight ACROSS conversations. The stage backend has a 2-socket pool
-    # that shares a connection ceiling with production, so stay at or below it.
+    # Max backend runs in flight ACROSS conversations. Per-environment (P2 brief A2): STAGE MUST
+    # STAY 1 -- its Zunkiree backend has a 2-socket pool sharing a connection ceiling with
+    # production, and raising this is a straight path to exhausting it. Prod sets 5 (D5: proven
+    # against an ElevenLabs Creator plan and its own, sized backend pool -- see docs/DEPLOY.md).
     voice_max_concurrent_runs: int = 1
     # Bound on one backend call (including waiting for a slot). A hung backend must not
     # hold a call open forever.
@@ -67,6 +64,11 @@ class Settings(BaseSettings):
     # Transcript rows (orca_gw.turns) older than this are purged by the sweep; calls, costs and
     # labels are kept. Decided 2026-09-21; revisit when call-recording legality is answered.
     metering_turn_retention_days: int = 30
+
+    @field_validator("db_schema")
+    @classmethod
+    def _validate_db_schema(cls, v: str) -> str:
+        return validate_schema(v)
 
 
 @lru_cache
