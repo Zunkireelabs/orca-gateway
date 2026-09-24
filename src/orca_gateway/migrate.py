@@ -97,14 +97,24 @@ def migrate(database_url: str, directory: Path, schema: str = "orca_gw") -> list
     return applied_now
 
 
-async def bootstrap(database_url: str, directory: Path, schema: str = "orca_gw") -> list[str]:
+async def bootstrap(
+    database_url: str, directory: Path, schema: str = "orca_gw"
+) -> tuple[list[str], list[str]]:
+    """Returns `(created tenants, added channels)`. A tenant is created only if its slug was
+    absent (unchanged from before); for a tenant that already existed, any channel in its JSON
+    that has no row yet is added (`slug/channel` entries) -- see `insert_missing_channels`.
+    Tenant-level fields of an existing tenant are never touched; edits go through the console."""
     repo = PgTenantRepository(database_url, schema=schema)
     created: list[str] = []
+    added: list[str] = []
     for path in sorted(directory.glob("*.json")):
         cfg = TenantConfig.model_validate(json.loads(path.read_text()))
         if await repo.insert_if_missing(cfg):
             created.append(cfg.slug)
-    return created
+        else:
+            for channel in await repo.insert_missing_channels(cfg):
+                added.append(f"{cfg.slug}/{channel}")
+    return created, added
 
 
 def main() -> None:
@@ -119,8 +129,9 @@ def main() -> None:
     applied = migrate(url, Path(args.dir), schema)
     print(f"applied migrations to schema {schema!r}: {applied or 'none (up to date)'}")
     if args.bootstrap:
-        created = asyncio.run(bootstrap(url, Path(args.bootstrap), schema))
-        print(f"bootstrapped tenants: {created or 'none (all already present)'}")
+        created, added = asyncio.run(bootstrap(url, Path(args.bootstrap), schema))
+        print(f"created tenants: {created or 'none'}")
+        print(f"added channels: {added or 'none'}")
 
 
 if __name__ == "__main__":

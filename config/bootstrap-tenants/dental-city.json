@@ -13,11 +13,24 @@
       "channel": "voice",
       "is_enabled": true,
       "agent_id": "front-desk",
-      "languages": ["ne", "en"],
+      "languages": [
+        "ne",
+        "en"
+      ],
       "default_language": "ne",
       "voice_id": null,
       "spoken_brand_name": "Dental City",
       "out_of_hours_behaviour": "handoff_anyway"
+    },
+    "chat": {
+      "channel": "chat",
+      "kill_switch": true,
+      "languages": [
+        "ne",
+        "en"
+      ],
+      "default_language": "ne",
+      "spoken_brand_name": "Dental City"
     }
   }
 }
