@@ -47,16 +47,25 @@ def connection_class(schema: str) -> type[psycopg.AsyncConnection]:
         async def execute(self, query, *args, **kwargs):
             if isinstance(query, str):
                 query = rewrite(query, schema)
-            return await super().execute(query, *args, **kwargs)
+            # psycopg's own AsyncConnection.execute() opens its cursor via self.cursor(), so the
+            # override below must let that internal call through -- only a *direct* .cursor()
+            # call from outside this method is refused.
+            self._schema_cursor_ok = True
+            try:
+                return await super().execute(query, *args, **kwargs)
+            finally:
+                self._schema_cursor_ok = False
 
         def cursor(self, *args, **kwargs):
             # A cursor's own .execute() never goes through the override above, so a future
             # cursor-based query would send the literal `orca_gw.<table>` straight to prod's
             # `orca_gw` schema instead of `orca_gw_prod`. Refuse outright rather than let that
             # happen quietly -- callers use connection.execute(...) instead.
-            raise NotImplementedError(
-                "connection_class(...).cursor() is refused: cursor-based queries bypass this "
-                "class's schema rewrite. Use connection.execute(...) instead."
-            )
+            if not getattr(self, "_schema_cursor_ok", False):
+                raise NotImplementedError(
+                    "connection_class(...).cursor() is refused: cursor-based queries bypass "
+                    "this class's schema rewrite. Use connection.execute(...) instead."
+                )
+            return super().cursor(*args, **kwargs)
 
     return _SchemaConnection
