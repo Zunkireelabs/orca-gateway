@@ -3,6 +3,29 @@
 {% block content %}
 <h1>Config</h1>
 {% if not tenant_slug %}
+<p class="sub">Environment ceiling vs. this fleet's own per-tenant caps, by channel.</p>
+<table>
+<thead><tr><th>Channel</th><th>Environment ceiling</th><th>Sum of tenant caps</th>
+  <th>Tenants with no cap</th><th></th></tr></thead>
+<tbody>
+{% for row in concurrency_summary %}
+<tr>
+  <td>{{ row.channel }}</td>
+  <td>{{ row.ceiling if row.ceiling is not none else '—' }}</td>
+  <td>{{ row.total }}</td>
+  <td>{{ row.uncapped_tenants }}</td>
+  <td>
+    {% if row.over_ceiling %}<span class="flag">sum over ceiling</span>{% endif %}
+    {% if row.uncapped_tenants > 0 %}<span class="flag">{{ row.uncapped_tenants }} tenant(s) uncapped</span>{% endif %}
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+<p class="field-note">"Sum of tenant caps" only counts tenants with a cap of their own; an uncapped
+  tenant can alone use up to the full environment ceiling, so a channel can be at risk even when
+  the sum looks fine.</p>
+
 <p class="sub">Pick a tenant and channel to edit.</p>
 <table>
 <thead><tr><th>Tenant</th><th>Channel</th><th></th></tr></thead>

@@ -323,8 +323,45 @@ async def config_index(request: Request, session: str = Depends(require_session)
             "active": "config",
             "tenant_channels": tenant_channels,
             "tenant_slug": None,
+            "concurrency_summary": _concurrency_summary(tenants),
         },
     )
+
+
+# P2 brief A5 follow-up: per-environment ceilings, by channel. Only "voice" has one today
+# (ORCA_VOICE_MAX_CONCURRENT_RUNS); a future channel's own setting is added here, never guessed.
+def _environment_ceiling(channel: str) -> int | None:
+    return {"voice": get_settings().voice_max_concurrent_runs}.get(channel)
+
+
+def _concurrency_summary(tenants: list[dict]) -> list[dict]:
+    """Per channel, across every tenant: the environment ceiling, the sum of every tenant's OWN
+    configured cap, and whether any tenant has no cap of its own. Two independent warning
+    conditions, surfaced separately since they are different risks: the sum can be over the
+    ceiling even with every tenant capped (they would still starve each other in the worst case),
+    and a single uncapped tenant can alone exhaust the ceiling regardless of the sum."""
+    caps_by_channel: dict[str, list[int | None]] = {}
+    for t in tenants:
+        for ch in t["channels"]:
+            caps_by_channel.setdefault(ch["channel"], []).append(ch.get("max_concurrent_runs"))
+
+    summary = []
+    for channel in sorted(caps_by_channel):
+        caps = caps_by_channel[channel]
+        ceiling = _environment_ceiling(channel)
+        configured = [c for c in caps if c is not None]
+        uncapped_tenants = len(caps) - len(configured)
+        total = sum(configured)
+        summary.append(
+            {
+                "channel": channel,
+                "ceiling": ceiling,
+                "total": total,
+                "uncapped_tenants": uncapped_tenants,
+                "over_ceiling": ceiling is not None and total > ceiling,
+            }
+        )
+    return summary
 
 
 @router.get("/config/{tenant_slug}/{channel}")
