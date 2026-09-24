@@ -1,0 +1,27 @@
+{
+  "slug": "healthy-smile",
+  "display_name": "Healthy Smile",
+  "is_active": true,
+  "timezone": "Asia/Kathmandu",
+  "backend": "zunkiree",
+  "backend_config": {
+    "site_id": "healthy-smile",
+    "base_url": "http://zunkiree-clinic-prod:8000"
+  },
+  "channels": {
+    "voice": {
+      "channel": "voice",
+      "languages": ["ne", "en"],
+      "default_language": "ne",
+      "spoken_brand_name": "Healthy Smile",
+      "kill_switch": true
+    },
+    "chat": {
+      "channel": "chat",
+      "languages": ["ne", "en"],
+      "default_language": "ne",
+      "spoken_brand_name": "Healthy Smile",
+      "kill_switch": true
+    }
+  }
+}
