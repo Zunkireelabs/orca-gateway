@@ -8,7 +8,7 @@ from orca_gateway.migrate import bootstrap, migrate
 from orca_gateway.tenant_repo import PgTenantRepository
 from orca_gateway.tenants import TenantStore
 from tests.conftest import MIGRATIONS
-from tests.tenant_fixtures import dental_city, quiet_spa
+from tests.tenant_fixtures import chat, dental_city, quiet_spa, voice
 
 
 def test_migrations_run_from_empty_create_only_orca_gw_and_are_idempotent(pg_url):
@@ -117,10 +117,123 @@ async def test_constraints_reject_inconsistent_rows_at_the_database(pg_url):
 
 async def test_bootstrap_inserts_missing_tenants_and_never_overwrites_edits(pg_url, tmp_path):
     (tmp_path / "dental-city.json").write_text(dental_city().model_dump_json())
-    assert await bootstrap(pg_url, tmp_path) == ["dental-city"]
+    assert await bootstrap(pg_url, tmp_path) == (["dental-city"], [])
 
     repo = PgTenantRepository(pg_url)
     await repo.set_kill_switch("dental-city", "voice", True)  # an edit made after bootstrap
-    assert await bootstrap(pg_url, tmp_path) == []  # already present: untouched
+    assert await bootstrap(pg_url, tmp_path) == ([], [])  # already present: untouched
     assert (await repo.load("dental-city")).channels["voice"].kill_switch is True
     json.loads((tmp_path / "dental-city.json").read_text())  # file itself is plain config data
+
+
+async def test_bootstrap_adds_a_missing_channel_to_an_existing_tenant_and_audits_it(
+    pg_url, tmp_path
+):
+    repo = PgTenantRepository(pg_url)
+    await repo.upsert(dental_city())  # tenant exists with voice only
+
+    cfg = dental_city()
+    cfg.channels["chat"] = chat(kill_switch=True)
+    (tmp_path / "dental-city.json").write_text(cfg.model_dump_json())
+    assert await bootstrap(pg_url, tmp_path) == ([], ["dental-city/chat"])
+
+    loaded = await repo.load("dental-city")
+    assert set(loaded.channels) == {"voice", "chat"}
+    assert loaded.channels["chat"].kill_switch is True
+
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select before, after, actor from orca_gw.config_audit "
+            "where action = 'channel_created' order by at desc limit 1"
+        ).fetchone()
+    assert row[0] is None
+    assert row[1]["channel"] == "chat"
+    assert row[2] == "bootstrap"
+
+
+async def test_bootstrap_never_touches_an_existing_channel_that_differs_in_the_json(
+    pg_url, tmp_path
+):
+    """The test that matters: a channel already present, even with different values in the JSON,
+    is left completely alone -- no update, no audit row."""
+    repo = PgTenantRepository(pg_url)
+    await repo.upsert(dental_city())  # voice: kill_switch False, languages [ne, en]
+
+    cfg = dental_city()
+    cfg.channels["voice"] = voice(
+        agent_id="front-desk",
+        out_of_hours_behaviour="handoff_anyway",
+        kill_switch=True,
+        languages=["en"],
+        default_language="en",
+    )
+    (tmp_path / "dental-city.json").write_text(cfg.model_dump_json())
+
+    with psycopg.connect(pg_url) as conn:
+        audit_count_before = conn.execute(
+            "select count(*) from orca_gw.config_audit"
+        ).fetchone()[0]
+
+    assert await bootstrap(pg_url, tmp_path) == ([], [])
+
+    loaded = await repo.load("dental-city")
+    assert loaded.channels["voice"].kill_switch is False  # untouched
+    assert loaded.channels["voice"].languages == ["ne", "en"]  # untouched
+
+    with psycopg.connect(pg_url) as conn:
+        audit_count_after = conn.execute("select count(*) from orca_gw.config_audit").fetchone()[
+            0
+        ]
+    assert audit_count_after == audit_count_before  # nothing audited
+
+
+async def test_bootstrap_rerun_after_adding_a_channel_is_a_noop(pg_url, tmp_path):
+    repo = PgTenantRepository(pg_url)
+    await repo.upsert(dental_city())
+
+    cfg = dental_city()
+    cfg.channels["chat"] = chat(kill_switch=True)
+    (tmp_path / "dental-city.json").write_text(cfg.model_dump_json())
+    assert await bootstrap(pg_url, tmp_path) == ([], ["dental-city/chat"])
+    assert await bootstrap(pg_url, tmp_path) == ([], [])  # re-run: no-op
+
+
+async def test_bootstrap_refuses_a_new_channel_without_kill_switch_and_inserts_nothing(
+    pg_url, tmp_path
+):
+    repo = PgTenantRepository(pg_url)
+    await repo.upsert(dental_city())
+
+    cfg = dental_city()
+    cfg.channels["chat"] = chat()  # kill_switch defaults to False
+    (tmp_path / "dental-city.json").write_text(cfg.model_dump_json())
+
+    import pytest
+
+    with pytest.raises(ValueError, match="kill_switch"):
+        await bootstrap(pg_url, tmp_path)
+
+    loaded = await repo.load("dental-city")
+    assert set(loaded.channels) == {"voice"}  # chat was not inserted
+
+    with psycopg.connect(pg_url) as conn:
+        count = conn.execute(
+            "select count(*) from orca_gw.config_audit where action = 'channel_created'"
+        ).fetchone()[0]
+    assert count == 0
+
+
+async def test_insert_missing_channels_runs_against_orca_gw_prod_too(pg_url, tmp_path):
+    schema = "orca_gw_prod"
+    from orca_gateway.migrate import migrate
+    from tests.conftest import MIGRATIONS
+
+    migrate(pg_url, MIGRATIONS, schema)
+    repo = PgTenantRepository(pg_url, schema=schema)
+    await repo.upsert(dental_city())
+
+    cfg = dental_city()
+    cfg.channels["chat"] = chat(kill_switch=True)
+    (tmp_path / "dental-city.json").write_text(cfg.model_dump_json())
+    assert await bootstrap(pg_url, tmp_path, schema) == ([], ["dental-city/chat"])
+    assert set((await repo.load("dental-city")).channels) == {"voice", "chat"}

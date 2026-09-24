@@ -114,6 +114,59 @@ class PgTenantRepository:
                 await self._upsert_channel(conn, row["id"], ch)
             return True
 
+    async def insert_missing_channels(self, cfg: TenantConfig) -> list[str]:
+        """Bootstrap, existing-tenant path: insert each channel in `cfg.channels` that has no row
+        yet for this tenant. Insert-only -- `on conflict (tenant_id, channel) do nothing` -- never
+        `do update`, so an existing row is left untouched even where it differs from the JSON. Not
+        `_upsert_channel`: that does `do update` and would overwrite a console edit.
+
+        A4 guard: a channel being ADDED to an existing tenant must carry `kill_switch: true` in the
+        JSON. If any would-be-added channel doesn't, nothing is inserted for this tenant -- the
+        guard is checked for every missing channel before any insert runs, and the whole call is
+        one transaction, so a failed guard can't leave some channels in and others out.
+
+        One `config_audit` row per inserted channel (`action='channel_created'`, `before=null`,
+        `after`=the inserted values, `actor='bootstrap'`); nothing is written for a channel that
+        already existed."""
+        async with await self._connect() as conn, conn.transaction():
+            cur = await conn.execute(
+                "select id from orca_gw.tenants where slug = %s for update", (cfg.slug,)
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise ValueError(f"no such tenant: {cfg.slug}")
+            tenant_id = row["id"]
+            cur = await conn.execute(
+                "select channel from orca_gw.tenant_channels where tenant_id = %s", (tenant_id,)
+            )
+            existing = {r["channel"] for r in await cur.fetchall()}
+            to_add = {name: ch for name, ch in cfg.channels.items() if name not in existing}
+            for name, ch in to_add.items():
+                if not ch.kill_switch:
+                    raise ValueError(
+                        f"refusing to add {cfg.slug}/{name}: a channel added to an existing "
+                        "tenant must have kill_switch: true in its JSON"
+                    )
+            added: list[str] = []
+            for name, ch in to_add.items():
+                cur = await conn.execute(
+                    f"insert into orca_gw.tenant_channels (tenant_id, {_CHANNEL_COLS}) values "
+                    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    "%s, %s, %s, %s, %s) on conflict (tenant_id, channel) do nothing "
+                    "returning channel",
+                    self._channel_values(tenant_id, ch),
+                )
+                if await cur.fetchone() is None:
+                    continue  # raced with another writer between the select above and here
+                added.append(name)
+                await conn.execute(
+                    "insert into orca_gw.config_audit "
+                    "(tenant_id, channel, action, before, after, actor) "
+                    "values (%s, %s, 'channel_created', null, %s, 'bootstrap')",
+                    (tenant_id, name, json.dumps(ch.model_dump(mode="json"))),
+                )
+            return added
+
     async def set_kill_switch(self, slug: str, channel: str, on: bool) -> None:
         async with await self._connect() as conn:
             await conn.execute(
@@ -252,7 +305,37 @@ class PgTenantRepository:
             return before, after
 
     @staticmethod
-    async def _upsert_channel(conn, tenant_id, ch: ChannelConfig) -> None:
+    def _channel_values(tenant_id, ch: ChannelConfig) -> tuple:
+        """The `(tenant_id, {_CHANNEL_COLS})` value tuple, shared by every writer of
+        `tenant_channels` so the column list and the value order can't drift apart."""
+        return (
+            tenant_id,
+            ch.channel,
+            ch.is_enabled,
+            ch.agent_id,
+            ch.elevenlabs_agent_id,
+            ch.languages,
+            ch.default_language,
+            ch.voice_id,
+            ch.spoken_brand_name,
+            ch.handoff_target,
+            None if ch.handoff_hours is None else json.dumps(ch.handoff_hours),
+            ch.out_of_hours_behaviour,
+            ch.out_of_hours_message,
+            ch.escalation_policy,
+            ch.escalation_instruction,
+            ch.closed_dates,
+            ch.closed_weekdays,
+            ch.max_session_seconds,
+            ch.daily_spend_cap,
+            ch.per_caller_rate_limit,
+            ch.max_concurrent_runs,
+            ch.kill_switch,
+            ch.allowed_origins,
+        )
+
+    @classmethod
+    async def _upsert_channel(cls, conn, tenant_id, ch: ChannelConfig) -> None:
         await conn.execute(
             f"insert into orca_gw.tenant_channels (tenant_id, {_CHANNEL_COLS}) values "
             "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
@@ -260,29 +343,5 @@ class PgTenantRepository:
             "on conflict (tenant_id, channel) do update set "
             + ", ".join(f"{c.strip()} = excluded.{c.strip()}" for c in _CHANNEL_COLS.split(",")[1:])
             + ", updated_at = now()",
-            (
-                tenant_id,
-                ch.channel,
-                ch.is_enabled,
-                ch.agent_id,
-                ch.elevenlabs_agent_id,
-                ch.languages,
-                ch.default_language,
-                ch.voice_id,
-                ch.spoken_brand_name,
-                ch.handoff_target,
-                None if ch.handoff_hours is None else json.dumps(ch.handoff_hours),
-                ch.out_of_hours_behaviour,
-                ch.out_of_hours_message,
-                ch.escalation_policy,
-                ch.escalation_instruction,
-                ch.closed_dates,
-                ch.closed_weekdays,
-                ch.max_session_seconds,
-                ch.daily_spend_cap,
-                ch.per_caller_rate_limit,
-                ch.max_concurrent_runs,
-                ch.kill_switch,
-                ch.allowed_origins,
-            ),
+            cls._channel_values(tenant_id, ch),
         )
