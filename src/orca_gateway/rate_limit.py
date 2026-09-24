@@ -15,10 +15,20 @@ from collections import deque
 
 
 class CallerRateLimiter:
-    def __init__(self, *, window_s: float = 60.0, clock=time.monotonic) -> None:
+    def __init__(
+        self, *, window_s: float = 60.0, idle_ttl_s: float | None = None, clock=time.monotonic
+    ) -> None:
         self._window_s = window_s
+        # A key (e.g. a widget session_id) is almost always seen exactly once -- a browser tab
+        # rarely revisits the same session. Without a sweep this dict grows forever, one entry
+        # per visitor for the life of the process. Same idle-TTL shape as
+        # `coalescer.TurnCoalescer._prune()`: swept opportunistically on every `allow()` call,
+        # never a background task of its own. Default is 10x the window: generous enough that a
+        # bursty-but-legitimate caller is never pruned mid-window.
+        self._idle_ttl_s = idle_ttl_s if idle_ttl_s is not None else window_s * 10
         self._clock = clock
         self._hits: dict[tuple[str, str, str], deque[float]] = {}
+        self._last_seen: dict[tuple[str, str, str], float] = {}
 
     def allow(self, tenant_slug: str, channel: str, caller_key: str, limit: int | None) -> bool:
         """True and records the hit if this caller may proceed now; False (and un-recorded --
@@ -27,15 +37,21 @@ class CallerRateLimiter:
         always True, and nothing is tracked for a caller nobody asked to be limited."""
         if limit is None:
             return True
-        key = (tenant_slug, channel, caller_key)
         now = self._clock()
+        self._prune_idle(now)
+        key = (tenant_slug, channel, caller_key)
         cutoff = now - self._window_s
         hits = self._hits.setdefault(key, deque())
+        self._last_seen[key] = now
         while hits and hits[0] < cutoff:
             hits.popleft()
         if len(hits) >= limit:
-            if not hits:
-                del self._hits[key]
             return False
         hits.append(now)
         return True
+
+    def _prune_idle(self, now: float) -> None:
+        cutoff = now - self._idle_ttl_s
+        for key in [k for k, seen in self._last_seen.items() if seen < cutoff]:
+            del self._last_seen[key]
+            self._hits.pop(key, None)

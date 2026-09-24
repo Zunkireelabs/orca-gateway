@@ -326,3 +326,110 @@ async def test_overlong_question_is_rejected(wired):
 async def test_empty_question_is_rejected(wired):
     r = await _post(body=_body(question=""))
     assert r.status_code == 400 and wired.calls == []
+
+
+# ---- CORS headers on every error path once the origin has already been validated ------------
+# Without these, a browser's fetch() rejects on the missing CORS header before JS ever sees the
+# status code -- indistinguishable from a network failure -- and the widget's own fallback
+# treats that like a 5xx, retrying straight to the direct Zunkiree path. For the spend cap this
+# silently bypasses it; for the others it's the same failure mode even where a real 5xx would
+# have triggered the (intended) fallback anyway.
+
+
+class _FakeMetering:
+    """Just enough of PgCallsRepository's interface for widget_chat.work() to reach the daily
+    spend cap check, with the call already over the tenant's cap."""
+
+    def __init__(self, *, spend: float = 999.0):
+        self.spend = spend
+
+    async def get_open_call(self, conversation_id):
+        return None
+
+    async def daily_spend_usd(self, tenant_slug):
+        return self.spend
+
+    async def refuse_call(self, **kw):
+        return None
+
+    async def touch_call(self, **kw):
+        return None
+
+    async def complete_turn(self, **kw):
+        return None
+
+    async def close_call(self, *a, **kw):
+        return None
+
+    async def record_abandoned_run(self, conversation_id):
+        return None
+
+
+async def test_spend_cap_403_carries_cors_headers(wired, monkeypatch):
+    capped = _dental_with_chat(daily_spend_cap=1.0)
+    monkeypatch.setattr(deps, "get_tenant_store", lambda: TenantStore(InMemoryRepo(capped)))
+    monkeypatch.setattr(deps, "get_calls_repo", lambda: _FakeMetering(spend=5.0))
+    r = await _post()
+    assert r.status_code == 403
+    assert r.headers["access-control-allow-origin"] == ORIGIN
+    assert wired.calls == []
+
+
+class _RaisingBackend(_Backend):
+    async def session(self, **kw):
+        raise RuntimeError("upstream exploded")
+        yield  # pragma: no cover -- makes this an async generator
+
+
+async def test_upstream_failure_502_carries_cors_headers(monkeypatch):
+    backend = _RaisingBackend()
+    monkeypatch.setattr(deps, "get_backend", lambda: backend)
+    monkeypatch.setattr(
+        deps, "get_tenant_store", lambda: TenantStore(InMemoryRepo(_dental_with_chat()))
+    )
+    monkeypatch.setattr(elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.0))
+    monkeypatch.setattr(elevenlabs_llm, "_tenant_limiter", TenantConcurrencyLimiter())
+    monkeypatch.setattr(widget_chat, "_rate_limiter", CallerRateLimiter(window_s=60.0))
+    r = await _post()
+    assert r.status_code == 502
+    assert r.headers["access-control-allow-origin"] == ORIGIN
+
+
+async def test_tenant_store_unreachable_503_carries_cors_headers(monkeypatch):
+    class _BrokenStore:
+        async def get(self, slug):
+            from orca_gateway.tenants import TenantStoreError
+
+            raise TenantStoreError("db down")
+
+    backend = _Backend()
+    monkeypatch.setattr(deps, "get_backend", lambda: backend)
+    monkeypatch.setattr(deps, "get_tenant_store", lambda: _BrokenStore())
+    monkeypatch.setattr(elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.0))
+    monkeypatch.setattr(elevenlabs_llm, "_tenant_limiter", TenantConcurrencyLimiter())
+    monkeypatch.setattr(widget_chat, "_rate_limiter", CallerRateLimiter(window_s=60.0))
+    r = await _post()
+    assert r.status_code == 503
+    assert r.headers["access-control-allow-origin"] == ORIGIN
+    assert backend.calls == []
+
+
+async def test_rate_limit_429_still_carries_cors_headers(wired, monkeypatch):
+    limited = _dental_with_chat(per_caller_rate_limit=1)
+    monkeypatch.setattr(deps, "get_tenant_store", lambda: TenantStore(InMemoryRepo(limited)))
+    r = await _post()
+    assert r.status_code == 200
+    r = await _post()
+    assert r.status_code == 429
+    assert r.headers["access-control-allow-origin"] == ORIGIN
+
+
+async def test_kill_switch_sse_error_keeps_no_special_headers_beyond_cors(wired, monkeypatch):
+    # Regression guard for the instruction to leave the kill-switch 200 SSE error frame as-is:
+    # still a 200, still an SSE error frame, still carrying cors_headers like before this fix.
+    killed = _dental_with_chat()
+    killed.channels["chat"].kill_switch = True
+    monkeypatch.setattr(deps, "get_tenant_store", lambda: TenantStore(InMemoryRepo(killed)))
+    r = await _post()
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == ORIGIN

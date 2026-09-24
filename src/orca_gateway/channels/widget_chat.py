@@ -214,7 +214,17 @@ async def widget_stream(request: Request):
         cfg = await deps.get_tenant_store().get(body.site_id)
     except TenantStoreError:
         log.exception("tenant config unreachable slug=%s", body.site_id)
-        raise HTTPException(503, "tenant config unavailable") from None
+        # The store being unreachable says nothing about which tenant or origin was asked for --
+        # unlike the origin gate below, there is no allowlist to check here, and reflecting the
+        # caller's own Origin leaks nothing origin-specific (same reasoning as the OPTIONS
+        # preflight, which also reflects unconditionally). Without this, a browser sees a fetch
+        # rejection indistinguishable from a network failure -- exactly the CORS-missing failure
+        # mode this whole fix is about, just on the tenant-store-outage path instead of the
+        # spend-cap one.
+        store_error_headers = (
+            {"access-control-allow-origin": origin, "vary": "Origin"} if origin else {}
+        )
+        return Response(status_code=503, content=b"", headers=store_error_headers)
 
     # Read the chat row directly (never through require_serving, which only RETURNS a row when
     # the tenant is fully servable) so the ORIGIN check below always has a real list to check
@@ -425,7 +435,12 @@ async def widget_stream(request: Request):
                 slot=get_tenant_limiter().slot(body.site_id, "chat", ch.max_concurrent_runs),
             )
         except DailySpendCapExceeded:
-            raise HTTPException(403, "tenant unavailable") from None
+            # Must carry cors_headers, not just a bare HTTPException: without them the browser's
+            # fetch() rejects on the CORS failure before JS ever sees a status code, which is
+            # indistinguishable from a network error -- and the widget's own fallback treats any
+            # fetch rejection like a 5xx, retrying straight to the direct Zunkiree path. That
+            # would bypass the daily spend cap entirely (see module docstring).
+            return Response(status_code=403, content=b"", headers=cors_headers)
         except ClientGoneError:
             return Response(status_code=499)
         except StaleTurnError:
@@ -434,7 +449,20 @@ async def widget_stream(request: Request):
             log.exception(
                 "chat turn failed conversation=%s depth=%s", conversation_id, depth
             )
-            raise HTTPException(502, "upstream agent unavailable") from None
+            return Response(status_code=502, content=b"", headers=cors_headers)
+
+    # Chat is buffered end-to-end (see module docstring): the caller sees nothing until `result`
+    # is fully ready, unlike voice's token-by-token stream. This is exactly the time that
+    # buffering costs a chat user -- logged separately from `complete()`'s `latency_ms` (which
+    # metering stores per call, not per turn, and isn't grep-able from app logs alone).
+    answer_wait_ms = int((time.monotonic() - arrived) * 1000)
+    log.info(
+        "widget chat answer wait tenant=%s conversation=%s depth=%d wait_ms=%d",
+        body.site_id,
+        conversation_id,
+        depth,
+        answer_wait_ms,
+    )
 
     async def stream():
         # One token frame carrying the whole answer, then done -- see module docstring for why
