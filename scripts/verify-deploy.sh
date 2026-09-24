@@ -57,7 +57,13 @@ curl_headers() { # curl args (a -D- -o /dev/null dump)...
   local out st i
   for i in $(seq 1 10); do
     out=$(curl -s -D- -o /dev/null -m 10 "$@")
-    st=$(printf '%s' "$out" | head -1 | tr -dc '0-9')
+    # The status line is "HTTP/1.1 403 Forbidden" or "HTTP/2 403": take its SECOND field, never
+    # strip-and-concatenate digits over the whole line -- `tr -dc '0-9'` on "HTTP/2 403" produced
+    # "2403" (the "2" from the protocol), so a real 403 was never recognised as one. A connection
+    # failure prints no status line at all (empty $out), which must count as 000, not "" -- an
+    # empty st used to fall through the "not 000" branch on the first try and never retried.
+    st=$(printf '%s' "$out" | awk 'NR==1{print $2}')
+    [ -n "$st" ] || st="000"
     [ "$st" = "000" ] || { printf '%s' "$out"; return; }
     sleep 2
   done
@@ -86,7 +92,10 @@ disallowed_origin_headers=$(curl_headers -X POST "$URL/v1/widget/stream" \
   -H 'origin: https://not-a-real-tenant-origin.example.com' \
   -H 'content-type: application/json' \
   -d '{"site_id":"verify-deploy-probe","question":"x","session_id":"verify-deploy-probe"}')
-disallowed_origin_code=$(printf '%s' "$disallowed_origin_headers" | head -1 | tr -dc '0-9')
+# Same fix as curl_headers' own status parse: the second field of the status line, not every
+# digit on it (`tr -dc '0-9'` turned "HTTP/2 403" into "2403").
+disallowed_origin_code=$(printf '%s' "$disallowed_origin_headers" | awk 'NR==1{print $2}')
+[ -n "$disallowed_origin_code" ] || disallowed_origin_code="000"
 check "POST /v1/widget/stream disallowed origin" 403 "$disallowed_origin_code"
 if printf '%s' "$disallowed_origin_headers" | grep -qi '^access-control-allow-origin:'; then
   echo "::error::disallowed Origin got a CORS header on /v1/widget/stream"; fail=1
