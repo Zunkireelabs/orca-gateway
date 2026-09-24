@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 
 
@@ -38,6 +39,20 @@ class StaleTurnError(Exception):
 
 class ClientGoneError(Exception):
     """Every caller waiting on this turn disconnected."""
+
+
+class _NullSlot:
+    """No caller-supplied slot: a no-op async context manager, so `_run()` can always do
+    `async with slot:` without branching on whether one was given."""
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
+_NULL_SLOT = _NullSlot()
 
 
 @dataclass
@@ -89,13 +104,20 @@ class TurnCoalescer:
         work: Callable[[str], Awaitable],
         gone: Callable[[], Awaitable[bool]],
         on_decision: Callable[[str], None] | None = None,
+        slot: AbstractAsyncContextManager | None = None,
     ):
         """Run (or join) the turn at `depth`. `gone()` reports this caller disconnecting.
         `on_decision`, if given, is told what was decided for THIS request -- "stale", "started",
         "restarted" (newer text, run not yet committed), "joined" (same text), "joined_late"
         (different text, run committed and still running) or "joined_after_done" (different text,
         run already finished; it gets the cached answer to the earlier text) -- for observability
-        only; it never changes the outcome."""
+        only; it never changes the outcome.
+
+        `slot`, if given, is an extra async context manager entered around the actual backend
+        call, OUTSIDE this coalescer's own environment-wide semaphore (see `_run`) -- e.g. a
+        per-tenant concurrency cap, which must never hold a shared environment slot idle while it
+        waits on its own, narrower one. Only used when this call actually starts or restarts a
+        run; a request that merely joins an existing one never touches it."""
         self._prune()
         conv = self._convs.setdefault(conversation_id, _Conversation())
         conv.last_seen = time.monotonic()
@@ -131,7 +153,7 @@ class TurnCoalescer:
         if entry is None:
             decide("started")
             entry = conv.entries[depth] = _Entry(text=text)
-            entry.task = asyncio.create_task(self._run(conv, depth, entry, work, None))
+            entry.task = asyncio.create_task(self._run(conv, depth, entry, work, None, slot))
         elif not entry.result.done() and entry.text != text and not entry.committed:
             # Newer hypothesis for the same turn, and nothing has reached the backend yet:
             # restarting is free. Restart, after the old run has fully stopped.
@@ -140,7 +162,7 @@ class TurnCoalescer:
             if prev is not None:
                 prev.cancel()
             entry.text = text
-            entry.task = asyncio.create_task(self._run(conv, depth, entry, work, prev))
+            entry.task = asyncio.create_task(self._run(conv, depth, entry, work, prev, slot))
         else:
             # Same text, or a run that is already committed (or finished): share its result.
             if entry.text == text:
@@ -176,7 +198,13 @@ class TurnCoalescer:
         return None if tally is None else dict(tally)
 
     async def _run(
-        self, conv: _Conversation, depth: int, entry: _Entry, work, prev: asyncio.Task | None
+        self,
+        conv: _Conversation,
+        depth: int,
+        entry: _Entry,
+        work,
+        prev: asyncio.Task | None,
+        slot: AbstractAsyncContextManager | None = None,
     ) -> None:
         me = asyncio.current_task()
         # `wait`, never `await prev`: awaiting a task directly would let OUR cancellation cancel
@@ -188,14 +216,18 @@ class TurnCoalescer:
         await asyncio.sleep(self._debounce_s)
         try:
             async with asyncio.timeout(self._run_timeout_s):
-                async with self._slots:
-                    entry.committed = True  # no await between winning the slot and this line
-                    conv.running = me
-                    try:
-                        outcome = await work(entry.text)
-                    finally:
-                        if conv.running is me:
-                            conv.running = None
+                # The caller's slot (e.g. a per-tenant cap) is OUTER: waiting on a narrower,
+                # tenant-owned resource must never hold this environment-wide one idle. Both
+                # waits count against the same run timeout as the environment slot always has.
+                async with (slot if slot is not None else _NULL_SLOT):
+                    async with self._slots:
+                        entry.committed = True  # no await between winning the slot and this line
+                        conv.running = me
+                        try:
+                            outcome = await work(entry.text)
+                        finally:
+                            if conv.running is me:
+                                conv.running = None
         except asyncio.CancelledError:
             raise  # restarted, superseded or abandoned; the canceller settles the future
         except Exception as exc:

@@ -76,6 +76,24 @@ async def test_config_round_trips_write_read_invalidate_read(pg_url):
     assert await store.get("does-not-exist") is None
 
 
+async def test_max_concurrent_runs_round_trips_and_is_audited(pg_url):
+    repo = PgTenantRepository(pg_url)
+    await repo.upsert(dental_city())
+    before, after = await repo.update_channel_config(
+        "dental-city", "voice", {"max_concurrent_runs": 3}
+    )
+    assert before["max_concurrent_runs"] is None
+    assert after["max_concurrent_runs"] == 3
+    assert (await repo.load("dental-city")).channels["voice"].max_concurrent_runs == 3
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select before, after from orca_gw.config_audit "
+            "where action = 'update_channel_config' order by at desc limit 1"
+        ).fetchone()
+    assert row[0]["max_concurrent_runs"] is None  # psycopg decodes jsonb to dict directly
+    assert row[1]["max_concurrent_runs"] == 3
+
+
 async def test_constraints_reject_inconsistent_rows_at_the_database(pg_url):
     with psycopg.connect(pg_url, autocommit=True) as conn:
         conn.execute(

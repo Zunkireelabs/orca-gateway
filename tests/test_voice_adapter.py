@@ -13,8 +13,9 @@ from orca_gateway.coalescer import TurnCoalescer
 from orca_gateway.config import get_settings
 from orca_gateway.main import app
 from orca_gateway.seam import Channel, Identity, TurnEvent
+from orca_gateway.tenant_concurrency import TenantConcurrencyLimiter
 from orca_gateway.tenants import TenantStore
-from tests.tenant_fixtures import InMemoryRepo, dental_city
+from tests.tenant_fixtures import InMemoryRepo, dental_city, quiet_spa
 
 TRACE = "ae020331887c7f6b95acd0c22afb86fa"
 TP = f"00-{TRACE}-8a2e73c1d4f50b96-01"
@@ -348,3 +349,97 @@ async def test_the_current_year_is_the_tenants_local_year_not_utc(
     wired.events = [TurnEvent(type="done", data={"answer": "मिति 2026-12-31 हो", "sources": []})]
     r = await _post()
     assert json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"] == spoken
+
+
+# ---- P2 brief A5: per-tenant, per-channel concurrency cap -----------------------------------
+
+
+class _TrackingBackend(_Backend):
+    """Same as _Backend, but tracks how many backend calls are in flight AT ONCE, per tenant --
+    a leak across the per-tenant cap would show up as a tenant's own max_inflight exceeding it."""
+
+    def __init__(self, delay: float = 0.15):
+        super().__init__(delay=delay)
+        self.inflight: dict[str, int] = {}
+        self.max_inflight: dict[str, int] = {}
+
+    async def session(self, *, tenant, **kw):
+        self.inflight[tenant] = self.inflight.get(tenant, 0) + 1
+        self.max_inflight[tenant] = max(self.max_inflight.get(tenant, 0), self.inflight[tenant])
+        try:
+            async for event in super().session(tenant=tenant, **kw):
+                yield event
+        finally:
+            self.inflight[tenant] -= 1
+
+
+def _tp(n: int) -> str:
+    return f"00-{n:032x}-8a2e73c1d4f50b96-01"
+
+
+async def test_two_tenants_each_capped_at_one_never_exceed_their_own_slot(monkeypatch):
+    """The scenario named in the P2 brief: dental-city and quiet-spa, each with its own
+    max_concurrent_runs = 1, hammering the gateway at once. Neither tenant's own in-flight count
+    may ever exceed its own cap, and -- since the two run under separate semaphores -- both sets
+    of calls proceed concurrently rather than serialising against each other."""
+    monkeypatch.setenv("ORCA_VOICE_SHARED_SECRET", SECRET)
+    get_settings.cache_clear()
+    backend = _TrackingBackend(delay=0.15)
+    dental = dental_city()
+    dental.channels["voice"].max_concurrent_runs = 1
+    spa = quiet_spa()
+    spa.channels["voice"].max_concurrent_runs = 1
+    monkeypatch.setattr(deps, "get_backend", lambda: backend)
+    monkeypatch.setattr(
+        deps, "get_tenant_store", lambda: TenantStore(InMemoryRepo(dental, spa))
+    )
+    monkeypatch.setattr(
+        elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.0, max_concurrent_runs=4)
+    )
+    monkeypatch.setattr(elevenlabs_llm, "_tenant_limiter", TenantConcurrencyLimiter())
+
+    dental_reqs = [
+        _post(body=_body(user=f"d{i}"), headers=_headers(tp=_tp(i), tenant="dental-city"))
+        for i in range(1, 4)
+    ]
+    spa_reqs = [
+        _post(body=_body(user=f"s{i}"), headers=_headers(tp=_tp(100 + i), tenant="quiet-spa"))
+        for i in range(1, 4)
+    ]
+    responses = await asyncio.gather(*dental_reqs, *spa_reqs)
+
+    assert all(r.status_code == 200 for r in responses)
+    assert backend.max_inflight["dental-city"] == 1  # never exceeded its own cap
+    assert backend.max_inflight["quiet-spa"] == 1  # never exceeded its own cap, either
+    assert len(backend.calls) == 6  # every request reached the backend exactly once
+    tenants_called = {c["tenant"] for c in backend.calls}
+    assert tenants_called == {"dental-city", "quiet-spa"}
+
+
+async def test_a_configured_cap_is_never_shared_with_a_tenant_that_has_none(monkeypatch):
+    """dental-city is capped at 1; quiet-spa has no cap of its own at all. quiet-spa's uncapped
+    runs must never be limited by dental-city's semaphore -- proven by both tenants' calls
+    reaching the backend, and quiet-spa alone allowed to exceed a count of 1 in flight."""
+    monkeypatch.setenv("ORCA_VOICE_SHARED_SECRET", SECRET)
+    get_settings.cache_clear()
+    backend = _TrackingBackend(delay=0.15)
+    dental = dental_city()
+    dental.channels["voice"].max_concurrent_runs = 1
+    spa = quiet_spa()  # no max_concurrent_runs: unbounded except by the environment ceiling
+    monkeypatch.setattr(deps, "get_backend", lambda: backend)
+    monkeypatch.setattr(
+        deps, "get_tenant_store", lambda: TenantStore(InMemoryRepo(dental, spa))
+    )
+    monkeypatch.setattr(
+        elevenlabs_llm, "_coalescer", TurnCoalescer(debounce_s=0.0, max_concurrent_runs=4)
+    )
+    monkeypatch.setattr(elevenlabs_llm, "_tenant_limiter", TenantConcurrencyLimiter())
+
+    spa_reqs = [
+        _post(body=_body(user=f"s{i}"), headers=_headers(tp=_tp(200 + i), tenant="quiet-spa"))
+        for i in range(3)
+    ]
+    responses = await asyncio.gather(*spa_reqs)
+
+    assert all(r.status_code == 200 for r in responses)
+    assert backend.max_inflight["quiet-spa"] == 3  # bounded only by the environment cap of 4

@@ -410,6 +410,7 @@ async def config_save(
             max_session_seconds=_int("max_session_seconds"),
             daily_spend_cap=_float("daily_spend_cap"),
             per_caller_rate_limit=_int("per_caller_rate_limit"),
+            max_concurrent_runs=_int("max_concurrent_runs"),
         )
         # Validate the WHOLE form (both writes) before touching the database: update_channel_config
         # validates again internally, but that is after update_tenant_timezone would already have

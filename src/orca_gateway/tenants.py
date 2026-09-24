@@ -47,6 +47,11 @@ class ChannelConfig(BaseModel):
     max_session_seconds: int | None = None
     daily_spend_cap: float | None = None
     per_caller_rate_limit: int | None = None
+    # P2 brief A5: how many backend runs THIS tenant's channel may have in flight at once, across
+    # all its conversations. None = no cap of its own -- still bounded by the per-environment
+    # ceiling (ORCA_VOICE_MAX_CONCURRENT_RUNS). Never lets one tenant use another's slots: it is
+    # enforced by its own semaphore, keyed on (tenant, channel), never shared with any other key.
+    max_concurrent_runs: int | None = Field(default=None, gt=0)
     kill_switch: bool = False
 
     @field_validator("closed_weekdays")

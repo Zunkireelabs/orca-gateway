@@ -101,6 +101,9 @@
 <input type="number" step="0.01" name="daily_spend_cap" value="{{ ch.daily_spend_cap if ch.daily_spend_cap is not none else '' }}">
 <label>Per-caller rate limit <span class="not-enforced">(stored, not enforced)</span></label>
 <input type="number" name="per_caller_rate_limit" value="{{ ch.per_caller_rate_limit or '' }}">
+<label>Max concurrent runs</label>
+<input type="number" min="1" name="max_concurrent_runs" value="{{ ch.max_concurrent_runs or '' }}">
+<div class="field-note">This tenant's own cap on runs in flight at once, under the environment ceiling. Blank = no cap of its own.</div>
 </fieldset>
 
 <div class="actions"><button class="primary" type="submit">Save</button></div>

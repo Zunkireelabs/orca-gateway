@@ -286,6 +286,7 @@ async def test_config_save_updates_fields_and_writes_audit_row(client, tenant, p
             "closed_dates": "",
             "max_session_seconds": "600",
             "daily_spend_cap": "25.00",
+            "max_concurrent_runs": "2",
         },
     )
     assert resp.status_code == 200
@@ -295,6 +296,7 @@ async def test_config_save_updates_fields_and_writes_audit_row(client, tenant, p
     assert ch.elevenlabs_agent_id == "eleven-front-desk-1"
     assert ch.out_of_hours_behaviour == "say_closed"
     assert ch.max_session_seconds == 600
+    assert ch.max_concurrent_runs == 2
     with psycopg.connect(pg_url) as conn:
         rows = conn.execute(
             "select action from orca_gw.config_audit where action = 'update_channel_config'"

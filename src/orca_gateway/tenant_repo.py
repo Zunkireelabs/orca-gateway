@@ -15,7 +15,8 @@ _CHANNEL_COLS = (
     "channel, is_enabled, agent_id, elevenlabs_agent_id, languages, default_language, voice_id, "
     "spoken_brand_name, handoff_target, handoff_hours, out_of_hours_behaviour, "
     "out_of_hours_message, escalation_policy, escalation_instruction, closed_dates, "
-    "closed_weekdays, max_session_seconds, daily_spend_cap, per_caller_rate_limit, kill_switch"
+    "closed_weekdays, max_session_seconds, daily_spend_cap, per_caller_rate_limit, "
+    "max_concurrent_runs, kill_switch"
 )
 
 
@@ -254,7 +255,8 @@ class PgTenantRepository:
     async def _upsert_channel(conn, tenant_id, ch: ChannelConfig) -> None:
         await conn.execute(
             f"insert into orca_gw.tenant_channels (tenant_id, {_CHANNEL_COLS}) values "
-            "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+            "%s, %s) "
             "on conflict (tenant_id, channel) do update set "
             + ", ".join(f"{c.strip()} = excluded.{c.strip()}" for c in _CHANNEL_COLS.split(",")[1:])
             + ", updated_at = now()",
@@ -279,6 +281,7 @@ class PgTenantRepository:
                 ch.max_session_seconds,
                 ch.daily_spend_cap,
                 ch.per_caller_rate_limit,
+                ch.max_concurrent_runs,
                 ch.kill_switch,
             ),
         )
