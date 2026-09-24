@@ -296,3 +296,66 @@ async def test_summary_tallies_how_each_depths_requests_were_handled():
     with pytest.raises(StaleTurnError):
         await c.submit("t", 5, "late", w, _never_gone)
     assert c.summary("t", 5)["stale"] == 1
+
+
+# ---- the caller-supplied `slot` (P2 brief A5: a per-tenant cap sits OUTSIDE the environment
+# semaphore, which the tests above already cover via max_concurrent_runs) ---------------------
+
+
+class _TrackingSlot:
+    """A minimal async context manager standing in for a per-tenant semaphore: records whether it
+    was ever entered while the environment-wide slot was ALSO held, and vice versa."""
+
+    def __init__(self):
+        self.entered = 0
+        self.was_held_during_work = False
+
+    async def __aenter__(self):
+        self.entered += 1
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+async def test_slot_is_entered_around_the_backend_call():
+    slot = _TrackingSlot()
+    c = TurnCoalescer(debounce_s=0.0)
+
+    async def work(text):
+        assert slot.entered == 1  # already held by the time work() runs
+        return f"done:{text}"
+
+    assert await c.submit("t", 1, "hi", work, _never_gone, slot=slot) == "done:hi"
+    assert slot.entered == 1
+
+
+async def test_slot_is_only_touched_by_the_request_that_starts_or_restarts_a_run():
+    # A request that merely JOINS an existing run never enters the slot it was given -- passing
+    # one is harmless (it isn't awaited unless a new run actually starts).
+    slots = [_TrackingSlot(), _TrackingSlot()]
+    c, w = TurnCoalescer(debounce_s=0.05), _Work(delay=0.2)
+    first = asyncio.create_task(c.submit("t", 5, "a", w, _never_gone, slot=slots[0]))
+    await asyncio.sleep(0.1)  # 'a' is committed and running
+    second = asyncio.create_task(c.submit("t", 5, "b", w, _never_gone, slot=slots[1]))
+    await asyncio.gather(first, second)
+    assert slots[0].entered == 1  # started the one run
+    assert slots[1].entered == 0  # joined it late; never ran its own backend call
+
+
+async def test_a_tenant_slot_never_blocks_another_tenants_slot():
+    # Two independent semaphores (as TenantConcurrencyLimiter hands out), each capped at 1: tenant
+    # A's runs never wait on tenant B's slot, and vice versa -- proven by both completing inside
+    # a window that would only fit one run if they shared a single slot.
+    import time as _time
+
+    sem_a, sem_b = asyncio.Semaphore(1), asyncio.Semaphore(1)
+    c, w = TurnCoalescer(debounce_s=0.0, max_concurrent_runs=2), _Work(delay=0.2)
+    start = _time.monotonic()
+    await asyncio.gather(
+        c.submit("conv-a", 1, "q", w, _never_gone, slot=sem_a),
+        c.submit("conv-b", 1, "q", w, _never_gone, slot=sem_b),
+    )
+    elapsed = _time.monotonic() - start
+    assert elapsed < 0.35  # ran concurrently, not serialised by a shared slot
+    assert w.max_inflight == 2

@@ -33,6 +33,7 @@ from orca_gateway.channels.number_speech import verbalize
 from orca_gateway.coalescer import ClientGoneError, StaleTurnError, TurnCoalescer
 from orca_gateway.config import get_settings
 from orca_gateway.seam import Identity
+from orca_gateway.tenant_concurrency import TenantConcurrencyLimiter
 from orca_gateway.tenants import (
     SLUG_PATTERN,
     TenantStoreError,
@@ -52,6 +53,7 @@ _SESSION_LIMIT_MESSAGE = (
     "please call back to continue."
 )
 _coalescer: TurnCoalescer | None = None
+_tenant_limiter: TenantConcurrencyLimiter | None = None
 
 
 def get_coalescer() -> TurnCoalescer:
@@ -64,6 +66,15 @@ def get_coalescer() -> TurnCoalescer:
             run_timeout_s=settings.voice_run_timeout_s,
         )
     return _coalescer
+
+
+def get_tenant_limiter() -> TenantConcurrencyLimiter:
+    # P2 brief A5: one process-wide limiter, keyed per (tenant, channel) -- same lifetime and
+    # singleton shape as get_coalescer() above.
+    global _tenant_limiter
+    if _tenant_limiter is None:
+        _tenant_limiter = TenantConcurrencyLimiter()
+    return _tenant_limiter
 
 
 class UpstreamError(Exception):
@@ -422,6 +433,9 @@ async def chat_completions(request: Request):
                 work,
                 request.is_disconnected,
                 on_decision=log_arrival,
+                # P2 brief A5: this tenant's own cap, under the environment ceiling. Keyed on
+                # (slug, "voice") -- never shared with another tenant's slot.
+                slot=get_tenant_limiter().slot(slug, "voice", ch.max_concurrent_runs),
             )
         except DailySpendCapExceeded:
             raise HTTPException(403, "tenant unavailable") from None

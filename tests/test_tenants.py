@@ -98,6 +98,15 @@ def test_tenant_validation_rejects_bad_slug_and_timezone():
         TenantConfig(slug="ok", display_name="x", timezone="Mars/Olympus")
 
 
+def test_max_concurrent_runs_defaults_to_no_cap_and_rejects_non_positive():
+    assert voice().max_concurrent_runs is None  # unset: bounded only by the environment ceiling
+    assert voice(max_concurrent_runs=1).max_concurrent_runs == 1
+    with pytest.raises(ValidationError):
+        voice(max_concurrent_runs=0)
+    with pytest.raises(ValidationError):
+        voice(max_concurrent_runs=-1)
+
+
 # ---- the cache: bounded TTL + explicit invalidation ----------------------------------------
 async def test_cache_serves_within_ttl_then_refreshes():
     repo, clock = InMemoryRepo(dental_city()), Clock()
