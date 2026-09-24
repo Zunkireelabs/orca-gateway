@@ -61,10 +61,11 @@ jobs:
     steps:
       - name: Reject a malformed sha before anything uses it
         if: github.event_name == 'workflow_dispatch'
+        env:
+          SHA: ${{ inputs.sha }}
         run: |
-          sha="${{ github.event.inputs.sha }}"
-          echo "$sha" | grep -Eq '^[0-9a-f]{40}$' || {
-            echo "::error::sha input must be exactly 40 lowercase hex characters, got '$sha'"
+          echo "$SHA" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "::error::sha input must be exactly 40 lowercase hex characters, got '$SHA'"
             exit 1; }
       - uses: actions/checkout@v4
         with:
@@ -72,9 +73,11 @@ jobs:
           fetch-depth: 0
       - name: A prod dispatch may only target a commit already on main
         if: github.event_name == 'workflow_dispatch'
+        env:
+          SHA: ${{ inputs.sha }}
         run: |
-          git merge-base --is-ancestor "${{ github.event.inputs.sha }}" origin/main || {
-            echo "::error::${{ github.event.inputs.sha }} is not an ancestor of origin/main"; exit 1; }
+          git merge-base --is-ancestor "$SHA" origin/main || {
+            echo "::error::$SHA is not an ancestor of origin/main"; exit 1; }
       - uses: astral-sh/setup-uv@v3
         with:
           python-version: "3.11"
@@ -124,9 +127,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Confirm ${{ env.IMAGE }}:${{ github.event.inputs.sha }} exists
+        env:
+          SHA: ${{ inputs.sha }}
         run: |
-          docker manifest inspect "${{ env.IMAGE }}:${{ github.event.inputs.sha }}" >/dev/null || {
-            echo "::error::no image at ${{ env.IMAGE }}:${{ github.event.inputs.sha }} -- this sha was never pushed to main (or its build failed); nothing to deploy"
+          docker manifest inspect "${{ env.IMAGE }}:$SHA" >/dev/null || {
+            echo "::error::no image at ${{ env.IMAGE }}:$SHA -- this sha was never pushed to main (or its build failed); nothing to deploy"
             exit 1; }
 
   # Schema first, then code: the new container needs the tables. Idempotent; a failure here
@@ -366,4 +371,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify from outside the VPS (no conversational request)
-        run: scripts/verify-deploy.sh "$PROD_DOMAIN" "${{ github.event.inputs.sha }}"
+        env:
+          SHA: ${{ inputs.sha }}
+        run: scripts/verify-deploy.sh "$PROD_DOMAIN" "$SHA"

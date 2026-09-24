@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from orca_gateway import deps
 from orca_gateway.calls_repo import PgCallsRepository
 from orca_gateway.config import get_settings
+from orca_gateway.console import _concurrency_summary
 from orca_gateway.main import app
 from orca_gateway.reporting import Reporting
 from orca_gateway.tenant_repo import PgTenantRepository
@@ -254,6 +255,72 @@ async def test_cost_export_csv_marks_overstated_rows(client, tenant, pg_url):
 
 
 # ---- panel 4: config ------------------------------------------------------------------------
+
+
+def _tenant_row(*channels: dict) -> dict:
+    return {"channels": list(channels)}
+
+
+def test_concurrency_summary_sums_configured_caps_and_counts_uncapped_tenants(monkeypatch):
+    monkeypatch.setenv("ORCA_VOICE_MAX_CONCURRENT_RUNS", "2")
+    get_settings.cache_clear()
+    tenants = [
+        _tenant_row({"channel": "voice", "max_concurrent_runs": 1}),
+        _tenant_row({"channel": "voice", "max_concurrent_runs": None}),
+    ]
+    summary = {row["channel"]: row for row in _concurrency_summary(tenants)}
+    assert summary["voice"] == {
+        "channel": "voice",
+        "ceiling": 2,
+        "total": 1,  # only the configured cap counts
+        "uncapped_tenants": 1,
+        "over_ceiling": False,  # 1 <= 2
+    }
+    get_settings.cache_clear()
+
+
+def test_concurrency_summary_flags_over_ceiling_even_with_every_tenant_capped(monkeypatch):
+    monkeypatch.setenv("ORCA_VOICE_MAX_CONCURRENT_RUNS", "1")
+    get_settings.cache_clear()
+    tenants = [
+        _tenant_row({"channel": "voice", "max_concurrent_runs": 1}),
+        _tenant_row({"channel": "voice", "max_concurrent_runs": 1}),
+    ]
+    summary = _concurrency_summary(tenants)[0]
+    assert summary["uncapped_tenants"] == 0
+    assert summary["total"] == 2
+    assert summary["over_ceiling"] is True
+    get_settings.cache_clear()
+
+
+def test_concurrency_summary_has_no_ceiling_for_a_channel_without_an_environment_setting():
+    # "chat" has no ORCA_..._MAX_CONCURRENT_RUNS setting today; never fabricate one.
+    tenants = [_tenant_row({"channel": "chat", "max_concurrent_runs": None})]
+    summary = _concurrency_summary(tenants)[0]
+    assert summary["ceiling"] is None
+    assert summary["over_ceiling"] is False  # nothing to be over without a known ceiling
+
+
+async def test_config_index_flags_tenants_with_no_cap_of_their_own(client, tenant):
+    # Neither fixture tenant has max_concurrent_runs set: both are uncapped for voice.
+    _login(client)
+    resp = client.get("/console/config")
+    assert resp.status_code == 200
+    assert "2 tenant(s) uncapped" in resp.text
+    assert "sum over ceiling" not in resp.text  # sum of configured caps is 0; not over anything
+
+
+async def test_config_index_flags_the_sum_over_the_environment_ceiling(client, tenant, pg_url):
+    # Default environment ceiling is 1 (ORCA_VOICE_MAX_CONCURRENT_RUNS). Cap both tenants at 1
+    # each: the sum (2) is over the ceiling (1), even though every tenant IS capped.
+    repo = PgTenantRepository(pg_url)
+    await repo.update_channel_config(tenant, "voice", {"max_concurrent_runs": 1})
+    await repo.update_channel_config("quiet-spa", "voice", {"max_concurrent_runs": 1})
+    _login(client)
+    resp = client.get("/console/config")
+    assert resp.status_code == 200
+    assert "sum over ceiling" in resp.text
+    assert "tenant(s) uncapped" not in resp.text  # every tenant has its own cap now
 
 
 async def test_config_form_renders_current_values(client, tenant):
