@@ -1,4 +1,6 @@
+import json
 import typing
+from datetime import UTC, date, datetime
 
 import httpx
 import pytest
@@ -6,7 +8,7 @@ import pytest
 from orca_gateway.backends.zunkiree import ZunkireeAgentBackend, _to_turn_event
 from orca_gateway.seam import Identity, TurnEvent
 from orca_gateway.tenants import TenantStore, TenantUnavailableError
-from tests.tenant_fixtures import InMemoryRepo, dental_city
+from tests.tenant_fixtures import InMemoryRepo, chat, dental_city
 
 # Every wire event type Zunkiree is known to send, mapped to the wire payload that produces it.
 # Kept next to seam.py's declared TurnEvent.type Literal below so a new member added there without
@@ -112,6 +114,11 @@ async def test_session_posts_to_query_stream_with_tenant_key(identity: Identity)
         "question": "hello",
         "session_id": "conv-1",
         "channel": "voice",
+        # P4 A2: tenant context, from the channel row
+        "channel_open": True,
+        "closed_reason": None,
+        "spoken_brand_name": "डेन्टल सिटी",
+        "handoff_target": None,
     }
 
 
@@ -196,3 +203,78 @@ async def test_killed_or_inactive_tenant_is_refused_by_the_backend_itself(
                 conversation_id="c",
             ):
                 pass
+
+
+# ---- P4 A2: tenant context sent to the brain, for both adapters -------------------------------
+
+
+async def _payload(tenant, channel, now, identity) -> dict:
+    captured: dict = {}
+    backend = ZunkireeAgentBackend(
+        tenants=TenantStore(InMemoryRepo(tenant)),
+        client=httpx.AsyncClient(transport=_mock_transport(captured)),
+        clock=lambda: now,
+    )
+    async for _ in backend.session(
+        agent_id="a",
+        channel=channel,
+        identity=identity,
+        tenant=tenant.slug,
+        turn="hi",
+        conversation_id="c-1",
+    ):
+        pass
+    return json.loads(captured["body"])
+
+
+def _with_chat(tenant):
+    tenant.channels["chat"] = chat(spoken_brand_name="Chat Brand", handoff_target="+977-1-000")
+    return tenant
+
+
+# 2026-10-20 is a Tuesday; Asia/Kathmandu is UTC+5:45.
+_TUE_NOON_UTC = datetime(2026, 10, 20, 6, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("channel", ["voice", "chat"])
+async def test_payload_says_open_with_no_reason_when_nothing_closes_the_channel(
+    identity: Identity, channel
+) -> None:
+    body = await _payload(_with_chat(dental_city()), channel, _TUE_NOON_UTC, identity)
+    assert body["channel_open"] is True and body["closed_reason"] is None
+    assert body["channel"] == channel
+
+
+@pytest.mark.parametrize("channel", ["voice", "chat"])
+@pytest.mark.parametrize(
+    "over, reason",
+    [
+        ({"closed_dates": [date(2026, 10, 20)]}, "closed_date"),
+        ({"closed_weekdays": [1]}, "closed_weekday"),
+        ({"handoff_hours": {"1": [["09:00", "10:00"]]}}, "outside_handoff_hours"),
+    ],
+)
+async def test_payload_carries_every_closed_reason(
+    identity: Identity, channel, over, reason
+) -> None:
+    tenant = _with_chat(dental_city())
+    for name in ("voice", "chat"):
+        for k, v in over.items():
+            setattr(tenant.channels[name], k, v)
+    body = await _payload(tenant, channel, _TUE_NOON_UTC, identity)
+    assert body["channel_open"] is False and body["closed_reason"] == reason
+
+
+async def test_payload_is_per_channel_brand_and_handoff_target(identity: Identity) -> None:
+    tenant = _with_chat(dental_city())
+    tenant.channels["voice"].handoff_target = "+977-1-111"
+    voice_body = await _payload(tenant, "voice", _TUE_NOON_UTC, identity)
+    chat_body = await _payload(tenant, "chat", _TUE_NOON_UTC, identity)
+    assert (voice_body["spoken_brand_name"], voice_body["handoff_target"]) == (
+        "डेन्टल सिटी",
+        "+977-1-111",
+    )
+    assert (chat_body["spoken_brand_name"], chat_body["handoff_target"]) == (
+        "Chat Brand",
+        "+977-1-000",
+    )

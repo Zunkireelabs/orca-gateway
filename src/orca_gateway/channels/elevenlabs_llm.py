@@ -32,6 +32,7 @@ from orca_gateway import deps
 from orca_gateway.channels.number_speech import verbalize
 from orca_gateway.coalescer import ClientGoneError, StaleTurnError, TurnCoalescer
 from orca_gateway.config import get_settings
+from orca_gateway.messages import spoken_message
 from orca_gateway.seam import Identity
 from orca_gateway.tenant_concurrency import TenantConcurrencyLimiter
 from orca_gateway.tenants import (
@@ -192,6 +193,57 @@ async def chat_completions(request: Request):
             decision,
         )
 
+    def speak(result: TurnResult, cfg) -> StreamingResponse:
+        """The single exit for every spoken answer, fallbacks included: numbers as words, then the
+        SSE frames. Nothing that reaches the caller's ears bypasses it."""
+        # Numbers are spoken as words: applied to the FINAL answer, per request, after the
+        # coalescer (the shared/cached result and the stored transcript keep the model's own
+        # text). Voice only; it can never raise, and anything ambiguous passes through unchanged.
+        spoken = result.answer
+        if get_settings().voice_number_speech:
+            # the year of 'today' where the tenant is, so a date in this year is read without it
+            this_year = deps.now().astimezone(ZoneInfo(cfg.timezone)).year
+            speech = verbalize(result.answer, current_year=this_year)
+            spoken = speech.text
+            if speech.converted:
+                # counts by class only: never the text (it can hold caller data)
+                log.info(
+                    "voice number speech conversations=%d classes=%s conversation=%s depth=%d",
+                    speech.converted,
+                    dict(speech.conversions),
+                    conversation_id,
+                    depth,
+                )
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        model = body.get("model", "orca")
+
+        async def stream():
+            # This is the first byte StreamingResponse actually writes back to ElevenLabs: log
+            # immediately before yielding it, not after building `spoken` above (that work already
+            # happened by the time stream() is even constructed).
+            log_leg("first_audio_sent", time.monotonic())
+            yield _chunk(
+                completion_id,
+                model,
+                delta={"role": "assistant", "content": spoken},
+                finish_reason=None,
+            )
+            yield _chunk(completion_id, model, delta={}, finish_reason="stop")
+            if result.usage:  # only when the backend reported real numbers; never fabricate zeros
+                usage_body = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [],
+                    "usage": result.usage,
+                }
+                yield f"data: {json.dumps(usage_body)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
     # Metering is a add-on to serving, never a precondition for it: if it cannot even be
     # constructed (e.g. no database configured), every check below degrades to "skip metering"
     # rather than turning into an unrelated 500 on every call.
@@ -215,7 +267,12 @@ async def chat_completions(request: Request):
                 log.exception(
                     "failed to close call on kill switch conversation=%s", conversation_id
                 )
-        raise HTTPException(403, "tenant unavailable") from None
+        killed = cfg.channel("voice") if exc.reason == "kill switch on" and cfg else None
+        if killed is None or not killed.spoken_kill_switch:
+            raise HTTPException(403, "tenant unavailable") from None
+        # P4 A1: this channel opted in to being HEARD when killed. Same refusal, same call close
+        # above, but through the normal spoken path: a 403 is silence on a phone.
+        return speak(TurnResult(answer=spoken_message("kill_switch", killed), usage=None), cfg)
     except TenantStoreError:
         log.exception("tenant config unreachable slug=%s", slug)
         raise HTTPException(503, "tenant config unavailable") from None
@@ -447,52 +504,13 @@ async def chat_completions(request: Request):
             result = TurnResult(answer="", usage=None)
         except Exception:
             log.exception("voice turn failed conversation=%s depth=%s", conversation_id, depth)
-            raise HTTPException(502, "upstream agent unavailable") from None
+            if not ch.spoken_error_fallback:
+                raise HTTPException(502, "upstream agent unavailable") from None
+            # P4 A1: a run timeout or backend error is SPOKEN, so the caller hears something and
+            # can retry. Recorded as an 'error' turn; duplicate raw requests of one failed turn
+            # each land here, and complete_turn is unique on (call, depth), so it counts once.
+            fallback = spoken_message("error_fallback", ch)
+            await complete(usage=None, user_text=turn, answer=fallback, ended_by="error")
+            result = TurnResult(answer=fallback, usage=None)
 
-    # Numbers are spoken as words: applied to the FINAL answer, per request, after the coalescer
-    # (the shared/cached result and the stored transcript keep the model's own text). Voice only;
-    # it can never raise, and anything ambiguous passes through unchanged.
-    spoken = result.answer
-    if get_settings().voice_number_speech:
-        # the year of 'today' where the tenant is, so a date in this year is read without it
-        this_year = deps.now().astimezone(ZoneInfo(cfg.timezone)).year
-        speech = verbalize(result.answer, current_year=this_year)
-        spoken = speech.text
-        if speech.converted:
-            # counts by class only: never the text (it can hold caller data)
-            log.info(
-                "voice number speech conversations=%d classes=%s conversation=%s depth=%d",
-                speech.converted,
-                dict(speech.conversions),
-                conversation_id,
-                depth,
-            )
-
-    completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    model = body.get("model", "orca")
-
-    async def stream():
-        # This is the first byte StreamingResponse actually writes back to ElevenLabs: log
-        # immediately before yielding it, not after building `spoken` above (that work already
-        # happened by the time stream() is even constructed).
-        log_leg("first_audio_sent", time.monotonic())
-        yield _chunk(
-            completion_id,
-            model,
-            delta={"role": "assistant", "content": spoken},
-            finish_reason=None,
-        )
-        yield _chunk(completion_id, model, delta={}, finish_reason="stop")
-        if result.usage:  # only when the backend reported real numbers; never fabricate zeros
-            usage_body = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [],
-                "usage": result.usage,
-            }
-            yield f"data: {json.dumps(usage_body)}\n\n"
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(stream(), media_type="text/event-stream")
+    return speak(result, cfg)

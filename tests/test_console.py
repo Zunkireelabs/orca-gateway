@@ -367,6 +367,8 @@ async def test_config_save_updates_fields_and_writes_audit_row(client, tenant, p
             "max_session_seconds": "600",
             "daily_spend_cap": "25.00",
             "max_concurrent_runs": "2",
+            "spoken_kill_switch": "on",
+            "kill_switch_message": "  {brand} is offline.  ",
         },
     )
     assert resp.status_code == 200
@@ -377,6 +379,9 @@ async def test_config_save_updates_fields_and_writes_audit_row(client, tenant, p
     assert ch.out_of_hours_behaviour == "say_closed"
     assert ch.max_session_seconds == 600
     assert ch.max_concurrent_runs == 2
+    # P4 A1: a ticked box is on, an unticked one is off, blank wording is "built-in"
+    assert ch.spoken_kill_switch is True and ch.kill_switch_message == "{brand} is offline."
+    assert ch.spoken_error_fallback is False and ch.error_fallback_message is None
     with psycopg.connect(pg_url) as conn:
         rows = conn.execute(
             "select action from orca_gw.config_audit where action = 'update_channel_config'"

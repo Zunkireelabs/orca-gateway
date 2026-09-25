@@ -44,7 +44,7 @@ def get_calls_repo() -> PgCallsRepository:
 
 @lru_cache
 def get_backend() -> AgentBackend:
-    return ZunkireeAgentBackend(tenants=get_tenant_store())
+    return ZunkireeAgentBackend(tenants=get_tenant_store(), clock=lambda: now())
 
 
 def now() -> datetime:

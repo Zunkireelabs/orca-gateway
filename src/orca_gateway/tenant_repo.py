@@ -16,8 +16,10 @@ _CHANNEL_COLS = (
     "spoken_brand_name, handoff_target, handoff_hours, out_of_hours_behaviour, "
     "out_of_hours_message, escalation_policy, escalation_instruction, closed_dates, "
     "closed_weekdays, max_session_seconds, daily_spend_cap, per_caller_rate_limit, "
-    "max_concurrent_runs, kill_switch, allowed_origins"
+    "max_concurrent_runs, kill_switch, allowed_origins, spoken_kill_switch, "
+    "spoken_error_fallback, kill_switch_message, error_fallback_message"
 )
+_CHANNEL_PLACEHOLDERS = ", ".join(["%s"] * (_CHANNEL_COLS.count(",") + 2))  # + tenant_id
 
 
 class PgTenantRepository:
@@ -151,8 +153,7 @@ class PgTenantRepository:
             for name, ch in to_add.items():
                 cur = await conn.execute(
                     f"insert into orca_gw.tenant_channels (tenant_id, {_CHANNEL_COLS}) values "
-                    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-                    "%s, %s, %s, %s, %s) on conflict (tenant_id, channel) do nothing "
+                    f"({_CHANNEL_PLACEHOLDERS}) on conflict (tenant_id, channel) do nothing "
                     "returning channel",
                     self._channel_values(tenant_id, ch),
                 )
@@ -332,14 +333,17 @@ class PgTenantRepository:
             ch.max_concurrent_runs,
             ch.kill_switch,
             ch.allowed_origins,
+            ch.spoken_kill_switch,
+            ch.spoken_error_fallback,
+            ch.kill_switch_message,
+            ch.error_fallback_message,
         )
 
     @classmethod
     async def _upsert_channel(cls, conn, tenant_id, ch: ChannelConfig) -> None:
         await conn.execute(
             f"insert into orca_gw.tenant_channels (tenant_id, {_CHANNEL_COLS}) values "
-            "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-            "%s, %s, %s) "
+            f"({_CHANNEL_PLACEHOLDERS}) "
             "on conflict (tenant_id, channel) do update set "
             + ", ".join(f"{c.strip()} = excluded.{c.strip()}" for c in _CHANNEL_COLS.split(",")[1:])
             + ", updated_at = now()",

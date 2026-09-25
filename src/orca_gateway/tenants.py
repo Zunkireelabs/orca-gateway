@@ -58,6 +58,17 @@ class ChannelConfig(BaseModel):
     # carry this column -- only chat's adapter enforces it today, the same "stored for every
     # channel, enforced where it applies" pattern as every other cap above.
     allowed_origins: list[str] = Field(default_factory=list)
+    # P4 brief A1: spoken fallbacks instead of silence. Each guard is a boolean, default OFF
+    # (today's behaviour), and each has an optional wording override -- None = the built-in
+    # message for default_language (see messages.py). {brand} is substituted in either.
+    # spoken_kill_switch: a kill-switched VOICE channel speaks the message instead of answering 403.
+    # Chat is unaffected: its kill switch keeps the tenant-safe error frame (widget_chat.py).
+    spoken_kill_switch: bool = False
+    kill_switch_message: str | None = None
+    # spoken_error_fallback: a run timeout / backend error on VOICE is spoken (and recorded as an
+    # 'error' turn) instead of surfacing as a 502 the caller hears as silence.
+    spoken_error_fallback: bool = False
+    error_fallback_message: str | None = None
 
     @field_validator("closed_weekdays")
     @classmethod

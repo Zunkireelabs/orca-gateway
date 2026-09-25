@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 
 import httpx
 
 from orca_gateway.seam import Channel, Identity, TurnEvent
-from orca_gateway.tenants import TenantStore, require_serving
+from orca_gateway.tenants import TenantStore, availability, require_serving
 
 logger = logging.getLogger("orca_gateway.backends.zunkiree")
 
@@ -25,8 +26,10 @@ class ZunkireeAgentBackend:
         *,
         tenants: TenantStore,
         client: httpx.AsyncClient | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._tenants = tenants
+        self._clock = clock
         self._client = client or httpx.AsyncClient(timeout=30.0)
 
     async def session(
@@ -42,7 +45,7 @@ class ZunkireeAgentBackend:
         # Defence in depth: the channel gate has already run, but this backend never serves a
         # tenant that is unknown, inactive, disabled or killed, whatever called it.
         cfg = await self._tenants.get(tenant)
-        require_serving(cfg, channel)
+        ch = require_serving(cfg, channel)
         assert cfg is not None
         if cfg.backend != "zunkiree":
             raise ValueError(f"tenant {tenant!r} is not bound to this backend")
@@ -58,6 +61,12 @@ class ZunkireeAgentBackend:
             "question": turn,
             "session_id": conversation_id,
             "channel": channel,
+            # P4 A2: tenant context the brain cannot know on its own, from the same channel row
+            # the adapter already gated on. Additive: a brain that doesn't read a field ignores it.
+            "channel_open": (open_now := availability(cfg, ch, self._clock())).open,
+            "closed_reason": open_now.reason,
+            "spoken_brand_name": ch.spoken_brand_name,
+            "handoff_target": ch.handoff_target,
         }
 
         async with self._client.stream(

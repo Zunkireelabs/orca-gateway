@@ -433,3 +433,23 @@ async def test_kill_switch_sse_error_keeps_no_special_headers_beyond_cors(wired,
     r = await _post()
     assert r.status_code == 200
     assert r.headers["access-control-allow-origin"] == ORIGIN
+
+
+# ---- P4 A1: the voice spoken-fallback flags never change chat ----------------------------------
+
+
+async def test_voice_spoken_fallback_flags_leave_chat_kill_switch_and_errors_unchanged(
+    wired, monkeypatch
+):
+    tenant = _dental_with_chat(
+        kill_switch=True, spoken_kill_switch=True, spoken_error_fallback=True
+    )
+    monkeypatch.setattr(deps, "get_tenant_store", lambda: TenantStore(InMemoryRepo(tenant)))
+    r = await _post()
+    assert _sse(r.text) == [{"type": "error", "message": widget_chat._UNAVAILABLE_MESSAGE}]
+
+    tenant.channels["chat"].kill_switch = False
+    wired.events = [TurnEvent(type="error", data={"message": "boom"})]
+    monkeypatch.setattr(deps, "get_tenant_store", lambda: TenantStore(InMemoryRepo(tenant)))
+    r = await _post(body=_body(session_id="sess-err"))
+    assert r.status_code == 502  # the widget's own fallback still fires on a real error
