@@ -17,7 +17,8 @@ _CHANNEL_COLS = (
     "out_of_hours_message, escalation_policy, escalation_instruction, closed_dates, "
     "closed_weekdays, max_session_seconds, daily_spend_cap, per_caller_rate_limit, "
     "max_concurrent_runs, kill_switch, allowed_origins, spoken_kill_switch, "
-    "spoken_error_fallback, kill_switch_message, error_fallback_message"
+    "spoken_error_fallback, kill_switch_message, error_fallback_message, phone_guard, "
+    "allowed_phone_numbers, phone_guard_message"
 )
 _CHANNEL_PLACEHOLDERS = ", ".join(["%s"] * (_CHANNEL_COLS.count(",") + 2))  # + tenant_id
 
@@ -337,6 +338,9 @@ class PgTenantRepository:
             ch.spoken_error_fallback,
             ch.kill_switch_message,
             ch.error_fallback_message,
+            ch.phone_guard,
+            ch.allowed_phone_numbers,
+            ch.phone_guard_message,
         )
 
     @classmethod

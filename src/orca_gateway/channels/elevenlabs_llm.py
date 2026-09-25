@@ -33,6 +33,7 @@ from orca_gateway.channels.number_speech import verbalize
 from orca_gateway.coalescer import ClientGoneError, StaleTurnError, TurnCoalescer
 from orca_gateway.config import get_settings
 from orca_gateway.messages import spoken_message
+from orca_gateway.phone_guard import guard_phone_numbers
 from orca_gateway.seam import Identity
 from orca_gateway.tenant_concurrency import TenantConcurrencyLimiter
 from orca_gateway.tenants import (
@@ -140,6 +141,19 @@ def _last_user_text(messages: list[dict]) -> str:
     raise HTTPException(400, "no user turn in messages")
 
 
+def _user_texts(messages: list[dict]) -> list[str]:
+    texts: list[str] = []
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        if isinstance(content, str):
+            texts.append(content)
+    return texts
+
+
 def _chunk(completion_id: str, model: str, **choice) -> str:
     body = {
         "id": completion_id,
@@ -200,10 +214,31 @@ async def chat_completions(request: Request):
         # coalescer (the shared/cached result and the stored transcript keep the model's own
         # text). Voice only; it can never raise, and anything ambiguous passes through unchanged.
         spoken = result.answer
+        voice_ch = cfg.channel("voice")
+        if voice_ch is not None and voice_ch.phone_guard:
+            # P4 A3: BEFORE number speech, which would turn a digit string into words that can no
+            # longer be compared. Replaces, never passes through; counts only, never a digit.
+            guarded = guard_phone_numbers(
+                spoken,
+                voice_ch.allowed_phone_numbers,
+                spoken_message("phone_guard", voice_ch),
+                # a number the caller said in this call may be read back to them
+                caller_texts=_user_texts(messages),
+            )
+            if guarded.replaced:
+                log.warning(
+                    "[PHONE-GUARD] replaced tenant=%s channel=voice count=%d conversation=%s "
+                    "depth=%d",
+                    slug,
+                    guarded.replaced,
+                    conversation_id,
+                    depth,
+                )
+            spoken = guarded.text
         if get_settings().voice_number_speech:
             # the year of 'today' where the tenant is, so a date in this year is read without it
             this_year = deps.now().astimezone(ZoneInfo(cfg.timezone)).year
-            speech = verbalize(result.answer, current_year=this_year)
+            speech = verbalize(spoken, current_year=this_year)
             spoken = speech.text
             if speech.converted:
                 # counts by class only: never the text (it can hold caller data)

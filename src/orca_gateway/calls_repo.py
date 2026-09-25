@@ -232,6 +232,18 @@ class PgCallsRepository:
                 (cost, call["id"]),
             )
 
+    async def user_texts(self, conversation_id: str, limit: int = 100) -> list[str]:
+        """What the caller said in this conversation so far (most recent `limit` stored turns).
+        PII: used in memory only (the phone guard), never logged."""
+        async with await self._connect() as conn:
+            cur = await conn.execute(
+                "select t.user_text from orca_gw.turns t join orca_gw.calls c on c.id = t.call_id "
+                "where c.conversation_id = %s and t.user_text is not null "
+                "order by t.depth desc limit %s",
+                (conversation_id, limit),
+            )
+            return [r["user_text"] for r in await cur.fetchall()]
+
     async def purge_turns(self, retention_days: int) -> int:
         """Deletes transcript rows older than the retention window (run by the sweep). Calls,
         costs and labels are untouched. Returns how many rows were purged."""

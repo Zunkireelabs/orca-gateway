@@ -369,6 +369,8 @@ async def test_config_save_updates_fields_and_writes_audit_row(client, tenant, p
             "max_concurrent_runs": "2",
             "spoken_kill_switch": "on",
             "kill_switch_message": "  {brand} is offline.  ",
+            "phone_guard": "on",
+            "allowed_phone_numbers": " +977-1-4444444 , 9801234567 ,",
         },
     )
     assert resp.status_code == 200
@@ -382,6 +384,8 @@ async def test_config_save_updates_fields_and_writes_audit_row(client, tenant, p
     # P4 A1: a ticked box is on, an unticked one is off, blank wording is "built-in"
     assert ch.spoken_kill_switch is True and ch.kill_switch_message == "{brand} is offline."
     assert ch.spoken_error_fallback is False and ch.error_fallback_message is None
+    assert ch.phone_guard is True and ch.phone_guard_message is None
+    assert ch.allowed_phone_numbers == ["+977-1-4444444", "9801234567"]
     with psycopg.connect(pg_url) as conn:
         rows = conn.execute(
             "select action from orca_gw.config_audit where action = 'update_channel_config'"
@@ -469,3 +473,28 @@ async def test_config_save_with_invalid_channel_field_does_not_partially_save_ti
     assert resp.status_code == 400
     cfg = await PgTenantRepository(pg_url).load(tenant)
     assert cfg.timezone == "Asia/Kathmandu"  # unchanged, not partially saved
+
+
+async def test_config_save_rejects_an_unusable_allowed_phone_number(client, tenant, pg_url):
+    _login(client)
+    csrf = _extract_csrf(client.get(f"/console/config/{tenant}/voice").text)
+    resp = client.post(
+        f"/console/config/{tenant}/voice",
+        data={
+            "csrf_token": csrf,
+            "timezone": "Asia/Kathmandu",
+            "agent_id": "front-desk",
+            "is_enabled": "on",
+            "languages": "ne,en",
+            "default_language": "ne",
+            "voice_id": "voice-ne-1",
+            "spoken_brand_name": "डेन्टल सिटी",
+            "out_of_hours_behaviour": "handoff_anyway",
+            "escalation_policy": "none",
+            "phone_guard": "on",
+            "allowed_phone_numbers": "12345",  # a typo would silently fail closed at call time
+        },
+    )
+    assert resp.status_code == 400
+    ch = (await PgTenantRepository(pg_url).load(tenant)).channels["voice"]
+    assert ch.phone_guard is False and ch.allowed_phone_numbers == []

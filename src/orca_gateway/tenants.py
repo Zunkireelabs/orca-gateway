@@ -19,6 +19,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from orca_gateway.phone_guard import MIN_DIGITS, digits_of
+
 logger = logging.getLogger("orca_gateway.tenants")
 
 Channel = Literal["voice", "chat"]
@@ -69,6 +71,22 @@ class ChannelConfig(BaseModel):
     # 'error' turn) instead of surfacing as a 502 the caller hears as silence.
     spoken_error_fallback: bool = False
     error_fallback_message: str | None = None
+    # P4 brief A3: the phone-number guard. When on, any phone-shaped span an answer contains that is
+    # not in allowed_phone_numbers is REPLACED (voice and chat). Empty list + on = every number is
+    # replaced (fail closed). Off = answers pass through as today.
+    phone_guard: bool = False
+    allowed_phone_numbers: list[str] = Field(default_factory=list)
+    phone_guard_message: str | None = None
+
+    @field_validator("allowed_phone_numbers")
+    @classmethod
+    def _phone_numbers_are_numbers(cls, v: list[str]) -> list[str]:
+        for entry in v:
+            if len(digits_of(entry)) < MIN_DIGITS:
+                # Never silently store an entry that could not match anything: fail at save time
+                # rather than as a mysterious replacement of the tenant's own number in a call.
+                raise ValueError(f"allowed_phone_numbers entry needs {MIN_DIGITS}+ digits")
+        return v
 
     @field_validator("closed_weekdays")
     @classmethod

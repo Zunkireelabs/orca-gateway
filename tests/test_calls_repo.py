@@ -327,3 +327,20 @@ async def test_sweep_loop_purges_expired_turns(repo, tenant, pg_url):
     task.cancel()
     with psycopg.connect(pg_url) as conn:
         assert conn.execute("select count(*) from orca_gw.turns").fetchone()[0] == 0
+
+
+async def test_user_texts_returns_only_this_conversations_stored_user_turns(repo, tenant):
+    for cid in ("conv-a", "conv-b"):
+        await repo.touch_call(
+            tenant_slug=tenant,
+            channel="chat",
+            conversation_id=cid,
+            agent_id="front-desk",
+            elevenlabs_agent_id=None,
+        )
+    await repo.complete_turn(conversation_id="conv-a", depth=1, usage=None, user_text="one")
+    await repo.complete_turn(conversation_id="conv-a", depth=2, usage=None, user_text="two")
+    await repo.complete_turn(conversation_id="conv-b", depth=1, usage=None, user_text="other")
+    assert await repo.user_texts("conv-a") == ["two", "one"]
+    assert await repo.user_texts("conv-a", limit=1) == ["two"]
+    assert await repo.user_texts("nope") == []
