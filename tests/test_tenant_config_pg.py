@@ -3,6 +3,7 @@
 import json
 
 import psycopg
+import pytest
 
 from orca_gateway.migrate import bootstrap, migrate
 from orca_gateway.tenant_repo import PgTenantRepository
@@ -237,3 +238,47 @@ async def test_insert_missing_channels_runs_against_orca_gw_prod_too(pg_url, tmp
     (tmp_path / "dental-city.json").write_text(cfg.model_dump_json())
     assert await bootstrap(pg_url, tmp_path, schema) == ([], ["dental-city/chat"])
     assert set((await repo.load("dental-city")).channels) == {"voice", "chat"}
+
+
+async def test_spoken_fallback_fields_default_off_round_trip_and_are_audited(pg_url):
+    repo = PgTenantRepository(pg_url)
+    await repo.upsert(dental_city())
+    ch = (await repo.load("dental-city")).channels["voice"]
+    assert (ch.spoken_kill_switch, ch.spoken_error_fallback) == (False, False)
+    assert (ch.kill_switch_message, ch.error_fallback_message) == (None, None)
+    before, after = await repo.update_channel_config(
+        "dental-city",
+        "voice",
+        {"spoken_kill_switch": True, "error_fallback_message": "{brand}: try again."},
+    )
+    assert before["spoken_kill_switch"] is False and after["spoken_kill_switch"] is True
+    ch = (await repo.load("dental-city")).channels["voice"]
+    assert ch.spoken_kill_switch is True and ch.spoken_error_fallback is False
+    assert ch.error_fallback_message == "{brand}: try again."
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select before, after from orca_gw.config_audit "
+            "where action = 'update_channel_config' order by at desc limit 1"
+        ).fetchone()
+    assert row[0]["spoken_kill_switch"] is False and row[1]["spoken_kill_switch"] is True
+
+
+async def test_turns_accept_the_error_and_kill_switch_outcomes(pg_url):
+    repo = PgTenantRepository(pg_url)
+    await repo.upsert(dental_city())
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute(
+            "insert into orca_gw.calls (tenant_id, channel, conversation_id, agent_id) "
+            "select id, 'voice', 'c-1', 'a' from orca_gw.tenants limit 1"
+        )
+        for depth, reason in enumerate(("error", "kill_switch"), start=1):
+            conn.execute(
+                "insert into orca_gw.turns (call_id, depth, ended_by) "
+                "select id, %s, %s from orca_gw.calls",
+                (depth, reason),
+            )
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "insert into orca_gw.turns (call_id, depth, ended_by) "
+                "select id, 9, 'nonsense' from orca_gw.calls"
+            )
