@@ -282,3 +282,44 @@ async def test_turns_accept_the_error_and_kill_switch_outcomes(pg_url):
                 "insert into orca_gw.turns (call_id, depth, ended_by) "
                 "select id, 9, 'nonsense' from orca_gw.calls"
             )
+
+
+async def test_phone_guard_fields_default_off_round_trip_and_are_audited(pg_url):
+    repo = PgTenantRepository(pg_url)
+    tenant = dental_city()
+    tenant.channels["chat"] = chat()
+    await repo.upsert(tenant)
+    for channel in ("voice", "chat"):
+        ch = (await repo.load("dental-city")).channels[channel]
+        assert (ch.phone_guard, ch.allowed_phone_numbers, ch.phone_guard_message) == (
+            False,
+            [],
+            None,
+        )
+    before, after = await repo.update_channel_config(
+        "dental-city",
+        "voice",
+        {"phone_guard": True, "allowed_phone_numbers": ["+977-1-4444444", "9801234567"]},
+    )
+    assert before["phone_guard"] is False and after["phone_guard"] is True
+    loaded = await repo.load("dental-city")
+    assert loaded.channels["voice"].allowed_phone_numbers == ["+977-1-4444444", "9801234567"]
+    assert loaded.channels["chat"].phone_guard is False  # per channel
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select before, after from orca_gw.config_audit "
+            "where action = 'update_channel_config' order by at desc limit 1"
+        ).fetchone()
+    assert row[0]["allowed_phone_numbers"] == [] and len(row[1]["allowed_phone_numbers"]) == 2
+
+
+async def test_a_bad_allowed_number_is_rejected_at_save_and_writes_nothing(pg_url):
+    from pydantic import ValidationError
+
+    repo = PgTenantRepository(pg_url)
+    await repo.upsert(dental_city())
+    with pytest.raises(ValidationError):
+        await repo.update_channel_config(
+            "dental-city", "voice", {"phone_guard": True, "allowed_phone_numbers": ["call us"]}
+        )
+    assert (await repo.load("dental-city")).channels["voice"].phone_guard is False

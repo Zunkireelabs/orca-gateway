@@ -46,6 +46,8 @@ from pydantic import BaseModel, ValidationError, field_validator
 from orca_gateway import deps
 from orca_gateway.channels.elevenlabs_llm import get_coalescer, get_tenant_limiter
 from orca_gateway.coalescer import ClientGoneError, StaleTurnError
+from orca_gateway.messages import spoken_message
+from orca_gateway.phone_guard import guard_phone_numbers
 from orca_gateway.rate_limit import CallerRateLimiter
 from orca_gateway.seam import Identity
 from orca_gateway.tenants import (
@@ -464,18 +466,44 @@ async def widget_stream(request: Request):
         answer_wait_ms,
     )
 
+    answer, suggestions = result.answer, result.suggestions
+    if ch.phone_guard:
+        # P4 A3: the same pass voice runs, before the token and done frames. The answer and the
+        # follow-up suggestions are both text the visitor reads; the stored transcript keeps the
+        # model's own text (as voice does). Counts only in the log, never a digit.
+        replacement = spoken_message("phone_guard", ch)
+        guarded = guard_phone_numbers(answer, ch.allowed_phone_numbers, replacement)
+        replaced = guarded.replaced
+        answer = guarded.text
+        clean: list = []
+        for suggestion in suggestions:
+            if isinstance(suggestion, str):
+                g = guard_phone_numbers(suggestion, ch.allowed_phone_numbers, replacement)
+                replaced += g.replaced
+                suggestion = g.text
+            clean.append(suggestion)
+        suggestions = clean
+        if replaced:
+            log.warning(
+                "[PHONE-GUARD] replaced tenant=%s channel=chat count=%d conversation=%s depth=%d",
+                body.site_id,
+                replaced,
+                conversation_id,
+                depth,
+            )
+
     async def stream():
         # One token frame carrying the whole answer, then done -- see module docstring for why
         # (the widget's `done` handler updates an existing message bubble; only a prior event
         # creates one). No fabricated intermediate deltas: same "the answer is a single unit"
         # buffering voice already does, in the shape chat's wire already expects.
-        yield _sse({"type": "token", "data": result.answer})
+        yield _sse({"type": "token", "data": answer})
         yield _sse(
             {
                 "type": "done",
-                "answer": result.answer,
+                "answer": answer,
                 "sources": result.sources,
-                "suggestions": result.suggestions,
+                "suggestions": suggestions,
                 "session_id": conversation_id,
             }
         )

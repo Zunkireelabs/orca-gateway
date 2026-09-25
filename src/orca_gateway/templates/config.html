@@ -142,6 +142,18 @@
 </fieldset>
 
 <fieldset>
+<legend>Phone-number guard (voice and chat)</legend>
+<label><input type="checkbox" name="phone_guard" style="width:auto;display:inline;" {% if ch.phone_guard %}checked{% endif %}> Replace any phone number in an answer that is not listed below</label>
+<label>Allowed phone numbers <span class="field-note">comma-separated, 7+ digits each; formatting and leading zeros are ignored</span></label>
+<input type="text" name="allowed_phone_numbers" value="{{ ch.allowed_phone_numbers|join(',') }}">
+<label>Replacement wording <span class="field-note">blank = built-in; it is spliced into the sentence in place of the number; {brand} is substituted</span></label>
+<textarea name="phone_guard_message" rows="2">{{ ch.phone_guard_message or '' }}</textarea>
+<div class="field-note">Applies to the answer text, in code, before numbers are read out. Any number
+  the tenant wants spoken must be listed, including one inside the out-of-hours message. Guard on
+  with an empty list replaces every phone number. Off = answers pass through unchanged.</div>
+</fieldset>
+
+<fieldset>
 <legend>Public endpoint (chat)</legend>
 <label>Allowed origins <span class="field-note">comma-separated, e.g. https://tenant-site.example.com,https://demo.zunkireelabs.com</span></label>
 <input type="text" name="allowed_origins" value="{{ ch.allowed_origins|join(',') }}">
