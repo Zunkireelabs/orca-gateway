@@ -472,13 +472,25 @@ async def widget_stream(request: Request):
         # follow-up suggestions are both text the visitor reads; the stored transcript keeps the
         # model's own text (as voice does). Counts only in the log, never a digit.
         replacement = spoken_message("phone_guard", ch)
-        guarded = guard_phone_numbers(answer, ch.allowed_phone_numbers, replacement)
+        # Numbers the visitor typed in this conversation may be read back: the current question
+        # plus the stored user turns. History unavailable = only the current question (stricter).
+        said = [body.question]
+        if metering is not None:
+            try:
+                said += await metering.user_texts(conversation_id)
+            except Exception:
+                log.exception("metering user_texts failed conversation=%s", conversation_id)
+        guarded = guard_phone_numbers(
+            answer, ch.allowed_phone_numbers, replacement, caller_texts=said
+        )
         replaced = guarded.replaced
         answer = guarded.text
         clean: list = []
         for suggestion in suggestions:
             if isinstance(suggestion, str):
-                g = guard_phone_numbers(suggestion, ch.allowed_phone_numbers, replacement)
+                g = guard_phone_numbers(
+                    suggestion, ch.allowed_phone_numbers, replacement, caller_texts=said
+                )
                 replaced += g.replaced
                 suggestion = g.text
             clean.append(suggestion)

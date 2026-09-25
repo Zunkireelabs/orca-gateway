@@ -141,6 +141,19 @@ def _last_user_text(messages: list[dict]) -> str:
     raise HTTPException(400, "no user turn in messages")
 
 
+def _user_texts(messages: list[dict]) -> list[str]:
+    texts: list[str] = []
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        if isinstance(content, str):
+            texts.append(content)
+    return texts
+
+
 def _chunk(completion_id: str, model: str, **choice) -> str:
     body = {
         "id": completion_id,
@@ -206,7 +219,11 @@ async def chat_completions(request: Request):
             # P4 A3: BEFORE number speech, which would turn a digit string into words that can no
             # longer be compared. Replaces, never passes through; counts only, never a digit.
             guarded = guard_phone_numbers(
-                spoken, voice_ch.allowed_phone_numbers, spoken_message("phone_guard", voice_ch)
+                spoken,
+                voice_ch.allowed_phone_numbers,
+                spoken_message("phone_guard", voice_ch),
+                # a number the caller said in this call may be read back to them
+                caller_texts=_user_texts(messages),
             )
             if guarded.replaced:
                 log.warning(

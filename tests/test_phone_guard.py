@@ -24,8 +24,8 @@ REPL = "<REPLACED>"
 OURS = ["+977-1-4444444"]
 
 
-def g(text, allowed=(), repl=REPL):
-    return guard_phone_numbers(text, list(allowed), repl)
+def g(text, allowed=(), repl=REPL, **kw):
+    return guard_phone_numbers(text, list(allowed), repl, **kw)
 
 
 # ---- the pure function -----------------------------------------------------------------------
@@ -79,12 +79,19 @@ def test_same_number_needs_a_plus_to_forgive_a_country_code():
     [
         "Your visit is on 2026-10-20.",
         "It is 20-10-2026 today.",
+        "It is 20 10 2026 today.",
+        "It is 2026 10 20 today.",
+        "It is 20.10.2026 today.",
+        "Booking BK-20260924-0002 is confirmed.",
+        "Invoice INV-1234567-A is paid.",
+        "Ref 20260924-0002-BK.",
         "मिति २०८३-०६-२०",
         "The fee is Rs 1500000.",
         "The fee is रु १५००००० हो।",
         "The fee is 1500000 rupees.",
         "That is 1,500,000 in total.",
         "Pi is 3.1415926.",
+        "Version 1.2.3 is out.",
         "Open 10:00 to 17:30.",
         "We have 12 rooms and 3 doctors.",
         "Ask for code 123456.",  # under 7 digits
@@ -92,6 +99,29 @@ def test_same_number_needs_a_plus_to_forgive_a_country_code():
 )
 def test_dates_amounts_times_and_short_numbers_are_not_phone_numbers(text):
     assert g(text, []).replaced == 0 and g(text, []).text == text
+
+
+def test_dot_separated_numbers_are_covered_but_a_single_dot_is_a_decimal():
+    assert g("Call 01.441.2345 now.", []).replaced == 1
+    assert g("Call 01.441.2345 now.", ["014412345"]).replaced == 0
+    assert g("The ratio is 3.1415926.", []).replaced == 0
+
+
+def test_a_number_the_caller_said_may_be_read_back_in_any_format():
+    said = ["my number is 980 123 4567 please"]
+    assert g("I have 9801234567 for you.", [], caller_texts=said).replaced == 0
+    assert g("I have 980-123-4567 for you.", [], caller_texts=said).replaced == 0
+    assert g("I have 9801234568 for you.", [], caller_texts=said).replaced == 1
+
+
+def test_a_caller_number_does_not_excuse_an_invented_one_in_the_same_answer():
+    said = ["9801234567"]
+    r = g("Yours 9801234567, ours 01-5555555, alt 9811111111.", OURS, caller_texts=said)
+    assert r.text == f"Yours 9801234567, ours {REPL}, alt {REPL}." and r.replaced == 2
+
+
+def test_a_date_or_amount_the_caller_said_does_not_allow_anything():
+    assert g("Call 20261020.", [], caller_texts=["on 2026-10-20"]).replaced == 1
 
 
 def test_empty_allowlist_fails_closed():
@@ -247,3 +277,119 @@ async def test_the_guard_flag_is_per_channel_voice_on_does_not_guard_chat(monkey
     tenant.channels["voice"].phone_guard = True
     frames = chat_t._sse((await chat_t._post()).text)
     assert frames[1]["answer"] == ANSWER
+
+
+# ---- P4 §5 review fixes: identifiers, read-back, dates ---------------------------------------
+
+
+def _voice_world_with(monkeypatch, answer, user="hello", **over):
+    tenant = _voice_world(monkeypatch, **over)
+    backend = deps.get_backend()
+    backend.events = [TurnEvent(type="done", data={"answer": answer})]
+    return tenant, user
+
+
+async def test_voice_booking_reference_survives_the_guard(monkeypatch):
+    tenant, _ = _voice_world_with(
+        monkeypatch, "Your booking BK-20260924-0002 is set.", phone_guard=True
+    )
+    spoken = _voice_spoken(await voice_t._post())
+    assert spoken_message("phone_guard", tenant.channels["voice"]) not in spoken
+
+
+async def test_voice_reads_the_callers_own_number_back_but_not_an_invented_one(monkeypatch, caplog):
+    tenant, _ = _voice_world_with(
+        monkeypatch, "I have 9801234567 and also 9811111111.", phone_guard=True
+    )
+    caplog.set_level(logging.INFO)
+    body = voice_t._body(user="my number is 980 123 4567")
+    spoken = _voice_spoken(await voice_t._post(body=body))
+    assert spoken.count(spoken_message("phone_guard", tenant.channels["voice"])) == 1
+    assert "नौ आठ शून्य एक दुई तीन चार पाँच छ सात" in spoken  # theirs, read back
+    assert "9811111111" not in caplog.text and "9801234567" not in caplog.text
+
+
+async def test_voice_a_number_from_an_earlier_user_turn_counts_too(monkeypatch):
+    tenant, _ = _voice_world_with(monkeypatch, "Noted 9801234567.", phone_guard=True)
+    body = voice_t._body(user="thanks")
+    body["messages"].insert(1, {"role": "user", "content": "it is 9801234567"})
+    spoken = _voice_spoken(await voice_t._post(body=body))
+    assert spoken_message("phone_guard", tenant.channels["voice"]) not in spoken
+
+
+async def test_voice_only_user_messages_count_never_the_assistants_own(monkeypatch):
+    tenant, _ = _voice_world_with(monkeypatch, "Call 9801234567.", phone_guard=True)
+    body = voice_t._body(user="thanks")
+    body["messages"].insert(1, {"role": "assistant", "content": "try 9801234567"})
+    spoken = _voice_spoken(await voice_t._post(body=body))
+    assert spoken_message("phone_guard", tenant.channels["voice"]) in spoken
+
+
+async def test_voice_a_space_separated_date_is_not_replaced(monkeypatch):
+    tenant, _ = _voice_world_with(monkeypatch, "See you on 20 10 2026.", phone_guard=True)
+    spoken = _voice_spoken(await voice_t._post())
+    assert spoken_message("phone_guard", tenant.channels["voice"]) not in spoken
+
+
+class _History:
+    """A calls repo whose stored conversation holds earlier user turns."""
+
+    def __init__(self, texts):
+        self.texts = texts
+
+    async def get_open_call(self, cid):
+        return None
+
+    async def touch_call(self, **kw):
+        return None
+
+    async def complete_turn(self, **kw):
+        return None
+
+    async def record_abandoned_run(self, cid):
+        return None
+
+    async def close_call(self, cid, reason):
+        return None
+
+    async def user_texts(self, cid, limit=100):
+        return self.texts
+
+
+async def test_chat_booking_reference_survives_the_guard(monkeypatch):
+    _chat_world(monkeypatch, phone_guard=True)
+    deps.get_backend().events = [
+        TurnEvent(type="done", data={"answer": "Booked: BK-20260924-0002.", "sources": []})
+    ]
+    frames = chat_t._sse((await chat_t._post()).text)
+    assert frames[1]["answer"] == "Booked: BK-20260924-0002."
+
+
+async def test_chat_current_question_and_stored_turns_are_the_callers_numbers(monkeypatch):
+    tenant = _chat_world(monkeypatch, phone_guard=True, suggestions=())
+    monkeypatch.setattr(deps, "get_calls_repo", lambda: _History(["earlier: 9801234567"]))
+    deps.get_backend().events = [
+        TurnEvent(
+            type="done",
+            data={"answer": "A 9801234567 B 9822222222 C 9833333333.", "sources": []},
+        )
+    ]
+    body = chat_t._body(question="and 9822222222 too")
+    frames = chat_t._sse((await chat_t._post(body=body)).text)
+    replacement = spoken_message("phone_guard", tenant.channels["chat"])
+    assert frames[1]["answer"] == f"A 9801234567 B 9822222222 C {replacement}."
+
+
+async def test_chat_without_stored_history_only_trusts_the_current_question(monkeypatch):
+    class _Broken(_History):
+        async def user_texts(self, cid, limit=100):
+            raise ConnectionError("db down")
+
+    tenant = _chat_world(monkeypatch, phone_guard=True, suggestions=())
+    monkeypatch.setattr(deps, "get_calls_repo", lambda: _Broken([]))
+    deps.get_backend().events = [
+        TurnEvent(type="done", data={"answer": "A 9801234567 B 9822222222.", "sources": []})
+    ]
+    frames = chat_t._sse((await chat_t._post(body=chat_t._body(question="9822222222"))).text)
+    replacement = spoken_message("phone_guard", tenant.channels["chat"])
+    assert frames[1]["answer"] == f"A {replacement} B 9822222222."
