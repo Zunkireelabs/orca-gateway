@@ -49,7 +49,7 @@ def caller_language(text: str, ch: ChannelConfig) -> str:
     Nepali-spliced-into-an-English-sentence. Same Devanagari-only limit number_speech lives with;
     do not add a romanized-Nepali detector here."""
     lang = "ne" if _DEVANAGARI.search(text or "") else "en"
-    served = {l.split("-")[0].lower() for l in ch.languages}
+    served = {tag.split("-")[0].lower() for tag in ch.languages}
     return lang if lang in served else ch.default_language.split("-")[0].lower()
 
 

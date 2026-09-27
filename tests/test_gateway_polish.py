@@ -3,16 +3,12 @@ silence turn ("...") is answered by the gateway itself. Both flags default off; 
 with the flag on AND off, and the over-trigger cases (a real short turn, a bare "?") are proven to
 still reach the backend."""
 
-import json
-
-from orca_gateway import deps
-from orca_gateway.channels import elevenlabs_llm
 from orca_gateway.messages import caller_language, spoken_message
 from orca_gateway.seam import TurnEvent
 from tests import test_phone_guard as phone_t
 from tests import test_voice_adapter as voice_t
 from tests.tenant_fixtures import voice
-from tests.test_spoken_fallbacks import _Metering, _spoken, _tenant, _wire
+from tests.test_spoken_fallbacks import _spoken, _tenant, _wire
 
 # ---- caller_language() --------------------------------------------------------------------------
 
@@ -156,7 +152,7 @@ def _messages(*, prior: str | None, silence: str = "..."):
 async def test_silence_flag_off_reaches_the_backend_like_any_other_turn(monkeypatch):
     backend = voice_t._Backend()
     _wire(monkeypatch, _tenant(), backend)
-    r = await voice_t._post(body=voice_t._body(messages=_messages(prior=None)))
+    await voice_t._post(body=voice_t._body(messages=_messages(prior=None)))
     assert backend.calls  # dispatched, unlike A4 on
 
 
