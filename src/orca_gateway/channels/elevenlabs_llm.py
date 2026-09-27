@@ -37,6 +37,7 @@ from orca_gateway.phone_guard import guard_phone_numbers
 from orca_gateway.seam import Identity
 from orca_gateway.tenant_concurrency import TenantConcurrencyLimiter
 from orca_gateway.tenants import (
+    KILL_SWITCH_REASONS,
     SLUG_PATTERN,
     TenantStoreError,
     TenantUnavailableError,
@@ -390,7 +391,7 @@ async def chat_completions(request: Request):
     except TenantUnavailableError as exc:
         # Fail CLOSED and uniformly (no slug enumeration): unknown, inactive, disabled, killed.
         log.warning("tenant refused slug=%s reason=%s", slug, exc.reason)
-        if exc.reason == "kill switch on" and metering is not None:
+        if exc.reason in KILL_SWITCH_REASONS and metering is not None:
             # A deterministic, definitive signal that this call is over -- close it now rather
             # than waiting for the idle-timeout sweep (see 0002_calls.sql).
             try:
@@ -399,7 +400,7 @@ async def chat_completions(request: Request):
                 log.exception(
                     "failed to close call on kill switch conversation=%s", conversation_id
                 )
-        killed = cfg.channel("voice") if exc.reason == "kill switch on" and cfg else None
+        killed = cfg.channel("voice") if exc.reason in KILL_SWITCH_REASONS and cfg else None
         if killed is None or not killed.spoken_kill_switch:
             raise HTTPException(403, "tenant unavailable") from None
         # P4 A1: this channel opted in to being HEARD when killed. Same refusal, same call close

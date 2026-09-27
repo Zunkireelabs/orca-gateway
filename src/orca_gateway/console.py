@@ -112,7 +112,9 @@ def console_root(session: str = Depends(require_session)):
 
 @router.get("/fleet")
 async def fleet(request: Request, session: str = Depends(require_session)):
-    rows = await _reporting().fleet_rows()
+    reporting = _reporting()
+    rows = await reporting.fleet_rows()
+    agents = await reporting.agent_rows()
     return templates.TemplateResponse(
         request,
         "fleet.html",
@@ -120,6 +122,7 @@ async def fleet(request: Request, session: str = Depends(require_session)):
             "session": session,
             "active": "fleet",
             "rows": rows,
+            "agents": agents,
             "any_alert": any(r["alert"] for r in rows),
         },
     )
@@ -144,6 +147,25 @@ async def fleet_toggle(
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from None
     deps.get_tenant_store().invalidate(tenant_slug)  # effective now, not after the 15s TTL
+    return RedirectResponse("/console/fleet", status_code=303)
+
+
+@router.post("/fleet/agents/toggle")
+async def fleet_agent_toggle(
+    request: Request,
+    csrf_token: str = Form(...),
+    agent_name: str = Form(...),
+    on: str = Form(...),
+    session: str = Depends(require_session),
+):
+    require_csrf(request, csrf_token, session)
+    repo = deps.get_tenant_repo()
+    ok = await repo.set_agent_kill_switch(agent_name, on == "true")
+    if not ok:
+        raise HTTPException(404, "no such agent")
+    # Blast radius is every tenant this agent serves (P5 brief §5) -- clear the whole cache
+    # rather than one slug, same "effective now" guarantee as the per-channel toggle above.
+    deps.get_tenant_store().invalidate()
     return RedirectResponse("/console/fleet", status_code=303)
 
 

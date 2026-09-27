@@ -9,11 +9,11 @@ import json
 from psycopg.rows import dict_row
 
 from orca_gateway.db_schema import connection_class, validate_schema
-from orca_gateway.tenants import ChannelConfig, TenantConfig
+from orca_gateway.tenants import AgentConfig, ChannelConfig, TenantConfig
 
 _CHANNEL_COLS = (
-    "channel, is_enabled, agent_id, elevenlabs_agent_id, languages, default_language, voice_id, "
-    "spoken_brand_name, handoff_target, handoff_hours, out_of_hours_behaviour, "
+    "channel, is_enabled, agent_id, agent_ref, elevenlabs_agent_id, languages, default_language, "
+    "voice_id, spoken_brand_name, handoff_target, handoff_hours, out_of_hours_behaviour, "
     "out_of_hours_message, escalation_policy, escalation_instruction, closed_dates, "
     "closed_weekdays, max_session_seconds, daily_spend_cap, per_caller_rate_limit, "
     "max_concurrent_runs, kill_switch, allowed_origins, spoken_kill_switch, "
@@ -61,6 +61,7 @@ class PgTenantRepository:
                     None if c["daily_spend_cap"] is None else float(c["daily_spend_cap"])
                 )
                 channels[c["channel"]] = ChannelConfig(**c)
+            await self._attach_agents(conn, channels)
             return TenantConfig(
                 slug=row["slug"],
                 display_name=row["display_name"],
@@ -70,6 +71,26 @@ class PgTenantRepository:
                 backend_config=row["backend_config"],
                 channels=channels,
             )
+
+    @staticmethod
+    async def _attach_agents(conn, channels: dict[str, ChannelConfig]) -> None:
+        """Resolve `agent_ref` -> the `orca_gw.agents` object (P5). A join, not a stored column,
+        so it is done here rather than in `_CHANNEL_COLS` -- the request-serving hot path
+        (`load()`) is the only caller that needs the resolved object (`require_serving`'s agent
+        kill-switch check); console-only reads (`list_tenants`) don't build `ChannelConfig` at
+        all, and Panel 4's `update_channel_config` doesn't touch agent assignment."""
+        refs = {ch.agent_ref for ch in channels.values() if ch.agent_ref is not None}
+        if not refs:
+            return
+        cur = await conn.execute(
+            "select id, name, display_name, class as agent_class, brain_binding, "
+            "owning_product, version, kill_switch from orca_gw.agents where id = any(%s)",
+            (list(refs),),
+        )
+        by_id = {row["id"]: AgentConfig(**row) for row in await cur.fetchall()}
+        for ch in channels.values():
+            if ch.agent_ref is not None:
+                ch.agent = by_id.get(ch.agent_ref)
 
     async def upsert(self, cfg: TenantConfig) -> None:
         """Write a tenant and its channels (used by tests and the bootstrap CLI)."""
@@ -178,6 +199,35 @@ class PgTenantRepository:
                 "(select id from orca_gw.tenants where slug = %s)",
                 (on, channel, slug),
             )
+
+    async def set_agent_kill_switch(self, name: str, on: bool, *, actor: str = "console") -> bool:
+        """P5 Fleet 'Agents' section: the emergency, all-tenants kill switch on `orca_gw.agents`
+        (brief §5 -- refuses this agent on every tenant×channel that references it). Returns
+        False for an unknown agent name (the console turns that into a 404), never a partial
+        write. `tenant_id`/`channel` are null on the audit row: this action isn't scoped to
+        either, unlike every other config_audit row so far."""
+        async with await self._connect() as conn, conn.transaction():
+            cur = await conn.execute(
+                "select id, kill_switch from orca_gw.agents where name = %s for update", (name,)
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return False
+            await conn.execute(
+                "update orca_gw.agents set kill_switch = %s, updated_at = now() where id = %s",
+                (on, row["id"]),
+            )
+            await conn.execute(
+                "insert into orca_gw.config_audit "
+                "(tenant_id, channel, action, before, after, actor) "
+                "values (null, null, 'agent_kill_switch', %s, %s, %s)",
+                (
+                    json.dumps({"agent": name, "kill_switch": row["kill_switch"]}),
+                    json.dumps({"agent": name, "kill_switch": on}),
+                    actor,
+                ),
+            )
+            return True
 
     async def list_tenants(self) -> list[dict]:
         """Every tenant with its channels, for panel 1 (Fleet). Console-only read: unlike
@@ -316,6 +366,7 @@ class PgTenantRepository:
             ch.channel,
             ch.is_enabled,
             ch.agent_id,
+            ch.agent_ref,
             ch.elevenlabs_agent_id,
             ch.languages,
             ch.default_language,

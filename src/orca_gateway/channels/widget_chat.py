@@ -51,6 +51,7 @@ from orca_gateway.phone_guard import guard_phone_numbers
 from orca_gateway.rate_limit import CallerRateLimiter
 from orca_gateway.seam import Identity
 from orca_gateway.tenants import (
+    KILL_SWITCH_REASONS,
     TenantStoreError,
     TenantUnavailableError,
     availability,
@@ -249,7 +250,7 @@ async def widget_stream(request: Request):
         ch = require_serving(cfg, "chat")
     except TenantUnavailableError as exc:
         log.warning("tenant refused slug=%s channel=chat reason=%s", body.site_id, exc.reason)
-        if exc.reason == "kill switch on" and metering is not None:
+        if exc.reason in KILL_SWITCH_REASONS and metering is not None:
             try:
                 await metering.close_call(conversation_id, "kill_switch")
             except Exception:

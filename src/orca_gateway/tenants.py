@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from datetime import time as dtime
 from typing import Literal, Protocol
+from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -26,12 +27,40 @@ logger = logging.getLogger("orca_gateway.tenants")
 Channel = Literal["voice", "chat"]
 OutOfHours = Literal["take_message", "say_closed", "handoff_anyway"]
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
+AgentClass = Literal["public_receptionist", "operator_copilot"]
+
+
+class AgentConfig(BaseModel):
+    """P5: the object `tenant_channels.agent_ref` points at (`orca_gw.agents`). Resolved
+    read-side only -- never used for routing (that stays `ChannelConfig.agent_id`, per §7.3 of
+    the P5 brief: routing is not wired to the object until P10 convergence).
+    """
+
+    id: UUID
+    name: str
+    display_name: str
+    # §8.9: the two classes never merge -- named `agent_class` because `class` is a keyword.
+    agent_class: AgentClass
+    brain_binding: dict = Field(default_factory=dict)
+    owning_product: str = "zunkiree"
+    version: int = 1
+    # P5's per-agent kill switch: refuses the agent across EVERY tenant×channel that references
+    # it (brief §5), alongside the existing per-channel kill_switch.
+    kill_switch: bool = False
 
 
 class ChannelConfig(BaseModel):
     channel: Channel
     is_enabled: bool = True
     agent_id: str = "default"
+    # P5: the object link (`orca_gw.agents.id`) -- stored beside `agent_id`, which stays the
+    # string the seam sends. None on a channel whose backfilled/assigned agent row doesn't
+    # exist yet (never true after migration 0010, but a defensive default all the same).
+    agent_ref: UUID | None = None
+    # Resolved separately (a join, not a stored column) by the repository that can reach
+    # `orca_gw.agents` -- see tenant_repo.load(). None wherever nothing resolved it, e.g. every
+    # in-memory test fixture in tenant_fixtures.py.
+    agent: AgentConfig | None = None
     elevenlabs_agent_id: str | None = None
     languages: list[str] = Field(min_length=1)
     default_language: str
@@ -142,6 +171,12 @@ class TenantConfig(BaseModel):
         return self.channels.get(name)
 
 
+# The channel's own kill switch and the agent's (P5 §5) are two switches, one refusal: any
+# adapter that special-cases a kill-switch refusal (closing the call, speaking instead of a
+# raw error) must treat both reasons alike.
+KILL_SWITCH_REASONS = frozenset({"kill switch on", "agent kill switch on"})
+
+
 class TenantUnavailableError(Exception):
     """The tenant cannot serve this channel right now. Always fails CLOSED, never falls back."""
 
@@ -161,6 +196,10 @@ def require_serving(cfg: TenantConfig | None, channel: Channel) -> ChannelConfig
         raise TenantUnavailableError("channel not enabled")
     if ch.kill_switch:
         raise TenantUnavailableError("kill switch on")
+    # P5 §5: the agent's OWN kill switch refuses it here too -- same guard, same fail-closed
+    # gate, blast radius = every tenant×channel referencing that agent.
+    if ch.agent is not None and ch.agent.kill_switch:
+        raise TenantUnavailableError("agent kill switch on")
     return ch
 
 

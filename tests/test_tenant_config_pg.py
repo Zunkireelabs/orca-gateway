@@ -30,6 +30,7 @@ def test_migrations_run_from_empty_create_only_orca_gw_and_are_idempotent(pg_url
             "turns",
             "call_labels",
             "config_audit",
+            "agents",
             "schema_migrations",
         }
         assert set(tables.values()) == {"orca_gw"}  # nothing created in public
@@ -38,7 +39,7 @@ def test_migrations_run_from_empty_create_only_orca_gw_and_are_idempotent(pg_url
                 "select relname, relrowsecurity from pg_class c join pg_namespace n "
                 "on n.oid = c.relnamespace where n.nspname = 'orca_gw' and relkind = 'r' "
                 "and relname in ('tenants', 'tenant_channels', 'calls', 'tenant_daily_spend', "
-                "'turns', 'call_labels', 'config_audit')"
+                "'turns', 'call_labels', 'config_audit', 'agents')"
             )
         )
         assert rls == {
@@ -49,6 +50,7 @@ def test_migrations_run_from_empty_create_only_orca_gw_and_are_idempotent(pg_url
             "turns": True,
             "call_labels": True,
             "config_audit": True,
+            "agents": True,
         }
 
 
