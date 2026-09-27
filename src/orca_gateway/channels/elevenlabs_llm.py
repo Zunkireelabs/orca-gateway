@@ -626,7 +626,9 @@ async def chat_completions(request: Request):
         # substantive turn's language, since "..." has no language of its own.
         log_arrival("not_coalesced")
         prior = _last_substantive_user_text(messages)
-        nudge_lang = caller_language(prior, ch) if prior else ch.default_language.split("-")[0].lower()
+        nudge_lang = (
+            caller_language(prior, ch) if prior else ch.default_language.split("-")[0].lower()
+        )
         nudge_text = spoken_message("silence_nudge", ch, lang=nudge_lang)
         await touch()
         await complete(
