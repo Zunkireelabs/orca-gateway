@@ -154,6 +154,46 @@ def _user_texts(messages: list[dict]) -> list[str]:
     return texts
 
 
+_STUB_ANSWER = "This is a stub reply for the timeout test."
+_STUB_MAX_DELAY_S = 60.0
+_STUB_PHASES = ("before_headers", "after_headers")
+
+
+@dataclass
+class _Stub:
+    delay_s: float
+    phase: str
+    skip_backend: bool
+
+
+def _stub_params(request: Request) -> _Stub | None:
+    """P4-VOICE-FEEL A1: the stage-only timeout probe. None unless the master switch is on and
+    this is not prod's schema. Headers (X-Orca-Stub-Delay-S / -Phase / -Skip-Backend) override the
+    env values per request, so N can change per Preview call without a redeploy; they are read
+    ONLY when the switch is on, and a malformed one is ignored, never an error."""
+    settings = get_settings()
+    if not settings.voice_stub_enabled or settings.db_schema == "orca_gw_prod":
+        return None
+    delay, phase, skip = (
+        settings.voice_stub_delay_s,
+        settings.voice_stub_delay_phase,
+        settings.voice_stub_skip_backend,
+    )
+    h = request.headers
+    try:
+        if "x-orca-stub-delay-s" in h:
+            delay = float(h["x-orca-stub-delay-s"])
+    except ValueError:
+        pass
+    if h.get("x-orca-stub-phase") in _STUB_PHASES:
+        phase = h["x-orca-stub-phase"]
+    if h.get("x-orca-stub-skip-backend", "").lower() in ("1", "true", "0", "false"):
+        skip = h["x-orca-stub-skip-backend"].lower() in ("1", "true")
+    if phase not in _STUB_PHASES or not 0 <= delay <= _STUB_MAX_DELAY_S:
+        return None
+    return _Stub(delay_s=delay, phase=phase, skip_backend=skip)
+
+
 def _chunk(completion_id: str, model: str, **choice) -> str:
     body = {
         "id": completion_id,
@@ -179,6 +219,7 @@ async def chat_completions(request: Request):
 
     slug = _tenant_slug(request)
     log = logging.getLogger("orca_gateway.channels.elevenlabs_llm")
+    stub = _stub_params(request)
 
     def log_leg(leg: str, mono: float) -> None:
         # Diagnostic-only timing points (latency breakdown brief §1), correlated with the
@@ -207,7 +248,38 @@ async def chat_completions(request: Request):
             decision,
         )
 
-    def speak(result: TurnResult, cfg) -> StreamingResponse:
+    async def stub_delay(phase: str) -> None:
+        # A1 measurement aid (see _stub_params). Polls for the caller hanging up so the log
+        # records WHEN ElevenLabs gave up, which is the ceiling.
+        if stub is None or stub.delay_s <= 0 or stub.phase != phase:
+            return
+        log.info(
+            "voice stub delay start n=%.1fs phase=%s skip_backend=%s conversation=%s depth=%d",
+            stub.delay_s,
+            phase,
+            stub.skip_backend,
+            conversation_id,
+            depth,
+        )
+        started = time.monotonic()
+        outcome = "elapsed"
+        while (remaining := stub.delay_s - (time.monotonic() - started)) > 0:
+            await asyncio.sleep(min(0.25, remaining))
+            if await request.is_disconnected():
+                outcome = "client_gone"
+                break
+        log.info(
+            "voice stub delay end outcome=%s slept=%.2fs since_arrival=%.2fs phase=%s "
+            "conversation=%s depth=%d",
+            outcome,
+            time.monotonic() - started,
+            time.monotonic() - arrived,
+            phase,
+            conversation_id,
+            depth,
+        )
+
+    def speak(result: TurnResult, cfg, probe: bool = False) -> StreamingResponse:
         """The single exit for every spoken answer, fallbacks included: numbers as words, then the
         SSE frames. Nothing that reaches the caller's ears bypasses it."""
         # Numbers are spoken as words: applied to the FINAL answer, per request, after the
@@ -254,6 +326,8 @@ async def chat_completions(request: Request):
         model = body.get("model", "orca")
 
         async def stream():
+            if probe:  # A1: only the real answer path, never the kill-switch fallback
+                await stub_delay("after_headers")
             # This is the first byte StreamingResponse actually writes back to ElevenLabs: log
             # immediately before yielding it, not after building `spoken` above (that work already
             # happened by the time stream() is even constructed).
@@ -393,6 +467,8 @@ async def chat_completions(request: Request):
         # daily_spend_cap gates a call's FIRST turn only -- a call already running is never cut
         # off mid-conversation by a cap it started under (S5 brief 3.4). Metering being
         # unreachable fails OPEN: a metering outage must not become a serving outage.
+        if stub is not None and stub.skip_backend:
+            return TurnResult(answer=_STUB_ANSWER, usage=None)  # A1: no backend, no metering
         existing_call = None
         if metering is not None:
             try:
@@ -548,4 +624,5 @@ async def chat_completions(request: Request):
             await complete(usage=None, user_text=turn, answer=fallback, ended_by="error")
             result = TurnResult(answer=fallback, usage=None)
 
-    return speak(result, cfg)
+    await stub_delay("before_headers")
+    return speak(result, cfg, probe=True)

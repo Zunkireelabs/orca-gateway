@@ -40,6 +40,19 @@ class Settings(BaseSettings):
     # setting to tune: turn it off only to compare against the raw model text.
     voice_number_speech: bool = True
 
+    # P4-VOICE-FEEL A1 measurement aid, STAGE ONLY: sleep N seconds before the first byte of a
+    # voice turn to find ElevenLabs' Custom LLM timeout. MASTER SWITCH: off by default and never set
+    # in prod config; while off, the X-Orca-Stub-* request headers are ignored. It also refuses to
+    # act when db_schema is prod's (`orca_gw_prod`), even if set by mistake.
+    voice_stub_enabled: bool = False
+    # N when no header gives one. 0 = no delay.
+    voice_stub_delay_s: float = 0.0
+    # `before_headers` delays the whole response; `after_headers` sends the 200 + SSE headers first
+    # and delays only the first body chunk (tells time-to-first-byte from first-audio).
+    voice_stub_delay_phase: str = "before_headers"
+    # Skip the real backend turn and answer with a canned reply, so elapsed ~= N.
+    voice_stub_skip_backend: bool = False
+
     # Commit the running image was built from (set by the Docker build).
     git_sha: str = "unknown"
 

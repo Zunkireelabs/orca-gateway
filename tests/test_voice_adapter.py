@@ -443,3 +443,78 @@ async def test_a_configured_cap_is_never_shared_with_a_tenant_that_has_none(monk
 
     assert all(r.status_code == 200 for r in responses)
     assert backend.max_inflight["quiet-spa"] == 3  # bounded only by the environment cap of 4
+
+
+def _stub_logs(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "voice stub delay" in r.getMessage()]
+
+
+def _stub_on(monkeypatch, **env):
+    monkeypatch.setenv("ORCA_VOICE_STUB_ENABLED", "true")
+    for k, v in env.items():
+        monkeypatch.setenv(f"ORCA_VOICE_STUB_{k}", v)
+    get_settings.cache_clear()
+
+
+def _hdr(**h):
+    return {**_headers(), **h}
+
+
+async def test_stub_is_off_by_default_and_headers_are_ignored(wired, caplog):
+    caplog.set_level(logging.INFO, logger="orca_gateway.channels.elevenlabs_llm")
+    r = await _post(headers=_hdr(**{"x-orca-stub-delay-s": "5", "x-orca-stub-skip-backend": "1"}))
+    assert r.status_code == 200
+    assert _stub_logs(caplog) == []
+    assert len(wired.calls) == 1  # the real backend ran
+
+
+async def test_stub_refuses_prod_schema_even_when_switched_on(wired, monkeypatch, caplog):
+    _stub_on(monkeypatch, DELAY_S="5")
+    monkeypatch.setenv("ORCA_DB_SCHEMA", "orca_gw_prod")
+    get_settings.cache_clear()
+    caplog.set_level(logging.INFO, logger="orca_gateway.channels.elevenlabs_llm")
+    await _post()
+    assert _stub_logs(caplog) == []
+
+
+@pytest.mark.parametrize("phase", ["before_headers", "after_headers"])
+async def test_stub_delay_sleeps_before_the_first_byte_and_still_serves(
+    wired, caplog, monkeypatch, phase
+):
+    _stub_on(monkeypatch, DELAY_S="0.4", DELAY_PHASE=phase)
+    caplog.set_level(logging.INFO, logger="orca_gateway.channels.elevenlabs_llm")
+    t0 = asyncio.get_running_loop().time()
+    r = await _post()
+    assert asyncio.get_running_loop().time() - t0 >= 0.4
+    assert json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"] == "final:hello"
+    start, end = _stub_logs(caplog)
+    assert f"phase={phase}" in start and "outcome=elapsed" in end
+
+
+async def test_headers_override_env_when_on_and_skip_backend_gives_canned_reply(
+    wired, caplog, monkeypatch
+):
+    _stub_on(monkeypatch, DELAY_S="30")
+    caplog.set_level(logging.INFO, logger="orca_gateway.channels.elevenlabs_llm")
+    r = await _post(
+        headers=_hdr(
+            **{
+                "x-orca-stub-delay-s": "0.3",
+                "x-orca-stub-phase": "after_headers",
+                "x-orca-stub-skip-backend": "true",
+            }
+        )
+    )
+    assert wired.calls == []
+    assert elevenlabs_llm._STUB_ANSWER in r.text
+    start, _ = _stub_logs(caplog)
+    assert "n=0.3s" in start and "phase=after_headers" in start and "skip_backend=True" in start
+
+
+@pytest.mark.parametrize("bad", ["abc", "-1", "999", "nan"])
+async def test_malformed_or_out_of_range_header_delay_is_ignored(wired, caplog, monkeypatch, bad):
+    _stub_on(monkeypatch)
+    caplog.set_level(logging.INFO, logger="orca_gateway.channels.elevenlabs_llm")
+    r = await _post(headers=_hdr(**{"x-orca-stub-delay-s": bad}))
+    assert r.status_code == 200
+    assert _stub_logs(caplog) == []
