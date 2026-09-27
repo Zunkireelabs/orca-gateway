@@ -282,6 +282,11 @@ async def cost_export(
         "llm_completion_tokens",
         "llm_cost_usd",
         "abandoned_run_count",
+        "stt_minutes",
+        "tts_characters",
+        "elevenlabs_cost_fiat",
+        "telephony_minutes",
+        "all_in_cost_usd",
         "overstated",
     ]
     writer = csv.DictWriter(buf, fieldnames=fields)

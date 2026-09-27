@@ -2,38 +2,50 @@
 {% block title %}Cost — Orca console{% endblock %}
 {% block content %}
 <h1>Cost</h1>
-<p class="sub">This UTC calendar month, per tenant. STT/TTS/telephony are not automated yet.</p>
+<p class="sub">This UTC calendar month, per tenant × channel. All-in = LLM + ElevenLabs platform
+  cost + telephony (telephony is $0 until a connector exists). Margin is a documented TODO until
+  the tenant's price basis is set (see the P6 brief).</p>
 <table>
 <thead><tr>
-  <th>Tenant</th><th>Calls</th><th>Turns</th><th>Tokens</th><th>Known LLM cost</th>
-  <th>Unknown-cost calls</th><th>$/call</th><th>$/minute</th>
-  <th>STT</th><th>TTS</th><th>Telephony</th><th></th>
+  <th>Tenant</th><th>Channel</th><th>Calls</th><th>Turns</th><th>Tokens</th>
+  <th>Known LLM cost</th><th>Unknown LLM-cost calls</th>
+  <th>STT (min)</th><th>TTS (chars)</th><th>Known ElevenLabs cost</th>
+  <th>Not yet reconciled</th><th>Telephony (min)</th>
+  <th>All-in known cost</th><th>$/call</th><th>$/minute</th><th>Margin</th><th></th>
 </tr></thead>
 <tbody>
 {% for r in rows %}
 <tr>
   <td>{{ r.display_name }} <span class="muted">({{ r.tenant_slug }})</span>
     {% if r.has_overstated %}<div class="flag">includes pre-metering-fix calls</div>{% endif %}</td>
+  <td>{{ r.channel }}</td>
   <td>{{ r.calls }}</td>
   <td>{{ r.turns }}</td>
   <td>{{ r.tokens }}</td>
   <td>${{ "%.4f"|format(r.known_llm_cost_usd) }}</td>
   <td>{{ r.unknown_cost_calls }}</td>
+  <td>{{ "%.2f"|format(r.stt_minutes) }}</td>
+  <td>{{ r.tts_characters }}</td>
+  <td>${{ "%.4f"|format(r.known_elevenlabs_cost_usd) }}</td>
+  <td>{% if r.unreconciled_voice_calls %}<span class="badge-on">{{ r.unreconciled_voice_calls }}</span>{% else %}0{% endif %}</td>
+  <td>{{ "%.2f"|format(r.telephony_minutes) }}</td>
+  <td>${{ "%.4f"|format(r.all_in_known_cost_usd) }}</td>
   <td>{% if r.cost_per_call is not none %}${{ "%.4f"|format(r.cost_per_call) }}{% else %}—{% endif %}</td>
   <td>{% if r.cost_per_minute is not none %}${{ "%.4f"|format(r.cost_per_minute) }}{% else %}—{% endif %}</td>
-  <td class="muted">manual, see reconciliation doc</td>
-  <td class="muted">manual, see reconciliation doc</td>
-  <td class="muted">manual, see reconciliation doc</td>
+  <td class="muted">TODO (price not set)</td>
   <td><a class="button" href="/console/cost/export.csv?tenant_slug={{ r.tenant_slug }}">CSV</a></td>
 </tr>
 {% else %}
-<tr><td colspan="11" class="muted">No calls this month.</td></tr>
+<tr><td colspan="17" class="muted">No calls this month.</td></tr>
 {% endfor %}
 </tbody>
 </table>
 <p style="margin-top:16px;"><a class="button" href="/console/cost/export.csv">Export all tenants (CSV)</a></p>
 <p class="sub" style="margin-top:10px;">
   Rows for calls started before {{ cutoff }} (the PR #10 metering-fix deploy) may be overstated
-  by the bug it fixed and are flagged, never silently included as if accurate.
+  by the bug it fixed and are flagged, never silently included as if accurate. "Not yet
+  reconciled" counts voice calls whose ElevenLabs meters/cost haven't been pulled by
+  <code>python -m orca_gateway.reconcile</code> yet -- the all-in cost still only sums what is
+  known, exactly like unknown-cost calls on the LLM side.
 </p>
 {% endblock %}

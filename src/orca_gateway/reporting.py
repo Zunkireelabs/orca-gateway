@@ -9,7 +9,15 @@ from datetime import UTC, datetime
 
 from psycopg.rows import dict_row
 
+from orca_gateway.cost import TELEPHONY_RATE_USD_PER_MINUTE, all_in_cost_usd
 from orca_gateway.db_schema import connection_class, validate_schema
+
+
+def _elevenlabs_component(channel: str, elevenlabs_cost_fiat: float | None) -> float:
+    """Chat never touches ElevenLabs (P6 brief §7): its non-LLM cost is always and exactly zero,
+    never 'unreconciled'. Only voice's `elevenlabs_cost_fiat` can be genuinely unknown (not yet
+    pulled by `reconcile.py`)."""
+    return 0.0 if channel == "chat" else elevenlabs_cost_fiat
 
 
 class Reporting:
@@ -211,14 +219,23 @@ class Reporting:
             return call
 
     async def cost_by_tenant_month(self) -> list[dict]:
-        """Panel 3: per tenant, this UTC calendar month -- calls, turns, tokens, known LLM cost,
-        calls with unknown cost (unpriced + abandoned runs, kept separate, never folded into the
-        $0 sum), cost per call and per minute. `has_overstated` marks a tenant-month that includes
-        any call started before the PR #10 fix, so the total is flagged rather than presented as
-        clean."""
+        """Panel 3, P6: per **tenant × channel** (N2 -- voice and chat cost are different things,
+        `calls` already carries `channel`), this UTC calendar month -- calls, turns, tokens, known
+        LLM cost, calls with unknown LLM cost (unpriced + abandoned runs, kept separate, never
+        folded into the $0 sum), the STT/TTS volume meters, known ElevenLabs platform cost
+        (`elevenlabs_cost_fiat`, populated by `reconcile.py`), the all-in known cost (LLM +
+        ElevenLabs + telephony) and cost per call/minute computed from IT rather than LLM alone,
+        and `unreconciled_voice_calls` -- voice calls not yet pulled from ElevenLabs, kept
+        separate from the all-in total exactly like `unknown_cost_calls` is for LLM. Chat rows
+        never carry ElevenLabs data (brief §7: chat's cost is LLM-only and already complete), so
+        their `unreconciled_voice_calls` is always 0 and their all-in cost already IS the whole
+        story. `has_overstated` marks a row that includes any call started before the PR #10 fix,
+        so the total is flagged rather than presented as clean. `margin_usd` is always None here
+        -- see the P6 brief §6 Q4: it needs the tenant's price basis, not yet decided; adding it
+        is a template/reporting change only once that lands, never a fabricated number now."""
         async with await self._connect() as conn:
             cur = await conn.execute(
-                "select t.slug as tenant_slug, t.display_name, "
+                "select t.slug as tenant_slug, t.display_name, c.channel, "
                 "       count(*) as calls, "
                 "       coalesce(sum(c.turn_count), 0) as turns, "
                 "       coalesce(sum(coalesce(c.llm_prompt_tokens, 0) "
@@ -226,29 +243,52 @@ class Reporting:
                 "       coalesce(sum(c.llm_cost_usd), 0) as known_llm_cost_usd, "
                 "       count(*) filter (where c.llm_cost_usd is null) "
                 "         + coalesce(sum(c.abandoned_run_count), 0) as unknown_cost_calls, "
+                "       coalesce(sum(c.stt_minutes), 0) as stt_minutes, "
+                "       coalesce(sum(c.tts_characters), 0) as tts_characters, "
+                "       coalesce(sum(c.elevenlabs_cost_fiat), 0) as known_elevenlabs_cost_usd, "
+                "       count(*) filter (where c.channel = 'voice' "
+                "                        and c.elevenlabs_cost_fiat is null) "
+                "         as unreconciled_voice_calls, "
+                "       coalesce(sum(coalesce(c.telephony_minutes, 0)), 0) as telephony_minutes, "
                 "       coalesce(sum(extract(epoch from (coalesce(c.ended_at, now()) "
                 "                                         - c.started_at))), 0) / 60.0 as minutes, "
                 "       bool_or(c.started_at < %s) as has_overstated "
                 "from orca_gw.calls c join orca_gw.tenants t on t.id = c.tenant_id "
                 "where c.started_at >= date_trunc('month', now() at time zone 'utc')::date "
-                "group by t.slug, t.display_name "
-                "order by known_llm_cost_usd desc",
+                "group by t.slug, t.display_name, c.channel "
+                "order by t.slug, c.channel",
                 (self.METERING_FIX_CUTOFF,),
             )
             rows = await cur.fetchall()
             for r in rows:
                 r["known_llm_cost_usd"] = float(r["known_llm_cost_usd"])
+                r["stt_minutes"] = float(r["stt_minutes"])
+                r["known_elevenlabs_cost_usd"] = float(r["known_elevenlabs_cost_usd"])
+                r["telephony_minutes"] = float(r["telephony_minutes"])
                 minutes = float(r["minutes"])
-                r["cost_per_call"] = (
-                    r["known_llm_cost_usd"] / r["calls"] if r["calls"] else None
+                r["minutes"] = minutes
+                r["all_in_known_cost_usd"] = round(
+                    r["known_llm_cost_usd"]
+                    + r["known_elevenlabs_cost_usd"]
+                    + r["telephony_minutes"] * TELEPHONY_RATE_USD_PER_MINUTE,
+                    6,
                 )
-                r["cost_per_minute"] = r["known_llm_cost_usd"] / minutes if minutes > 0 else None
+                r["cost_per_call"] = (
+                    r["all_in_known_cost_usd"] / r["calls"] if r["calls"] else None
+                )
+                r["cost_per_minute"] = (
+                    r["all_in_known_cost_usd"] / minutes if minutes > 0 else None
+                )
+                r["margin_usd"] = None  # TODO(P6 §6 Q4): needs the tenant's price basis
             return rows
 
     async def cost_csv_rows(self, tenant_slug: str | None = None) -> list[dict]:
         """Panel 3 export: one row per call this month, for the unit-economics sheet. Carries
         `overstated` per row (not just per tenant-month) so the sheet can exclude or re-price
-        exactly the affected calls."""
+        exactly the affected calls. `all_in_cost_usd` is per-call (see cost.all_in_cost_usd):
+        None for a voice call not yet reconciled with ElevenLabs, never a partial total silently
+        presented as complete; a chat call's is always its `llm_cost_usd` (it never touches
+        ElevenLabs -- brief §7)."""
         where = ["c.started_at >= date_trunc('month', now() at time zone 'utc')::date"]
         params: list = []
         if tenant_slug:
@@ -259,7 +299,8 @@ class Reporting:
                 "select t.slug as tenant_slug, c.conversation_id, c.channel, c.started_at, "
                 "       c.ended_at, c.ended_reason, c.turn_count, c.llm_model, "
                 "       c.llm_prompt_tokens, c.llm_completion_tokens, c.llm_cost_usd, "
-                "       c.abandoned_run_count "
+                "       c.abandoned_run_count, c.stt_minutes, c.tts_characters, "
+                "       c.elevenlabs_cost_fiat, c.telephony_minutes "
                 "from orca_gw.calls c join orca_gw.tenants t on t.id = c.tenant_id "
                 f"where {' and '.join(where)} "
                 "order by c.started_at",
@@ -268,6 +309,15 @@ class Reporting:
             rows = await cur.fetchall()
             for r in rows:
                 r["llm_cost_usd"] = None if r["llm_cost_usd"] is None else float(r["llm_cost_usd"])
+                r["stt_minutes"] = None if r["stt_minutes"] is None else float(r["stt_minutes"])
+                r["elevenlabs_cost_fiat"] = (
+                    None if r["elevenlabs_cost_fiat"] is None else float(r["elevenlabs_cost_fiat"])
+                )
+                r["all_in_cost_usd"] = all_in_cost_usd(
+                    r["llm_cost_usd"],
+                    _elevenlabs_component(r["channel"], r["elevenlabs_cost_fiat"]),
+                    r["telephony_minutes"],
+                )
                 r["overstated"] = r["started_at"] < self.METERING_FIX_CUTOFF
             return rows
 

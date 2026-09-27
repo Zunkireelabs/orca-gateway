@@ -35,3 +35,40 @@ def cost_usd(
         return None
     prompt_price, completion_price = prices
     return round(prompt_tokens * prompt_price + completion_tokens * completion_price, 6)
+
+
+# P6 brief §3.2: telephony is zero BY DESIGN (no connector exists yet -- K1 open), never estimated.
+# Named so `all_in_cost_usd` reads as the real formula (LLM + platform + telephony) rather than a
+# silent omission, and so the one line that changes when K1 lands is obvious.
+TELEPHONY_RATE_USD_PER_MINUTE = 0.0
+
+
+def all_in_cost_usd(
+    llm_cost_usd: float | None,
+    elevenlabs_cost_fiat: float | None,
+    telephony_minutes: float | None = None,
+) -> float | None:
+    """LLM (ours, OpenAI, already billed to our account and captured in `llm_cost_usd`) + the
+    vendor's own non-LLM platform price (`elevenlabs_cost_fiat`, trusted as-is per the P6 brief
+    §6 Q2 -- the double-count trap this guards against is adding an LLM figure ElevenLabs' own
+    `cost_fiat` might also carry under a Custom LLM; the 10-call reconciliation in
+    docs/metering-reconciliation.md is what confirms it does not) + telephony (0 until K1).
+
+    `telephony_minutes is None` means "zero by design" (0002_calls.sql: no connector exists),
+    NOT unknown -- it is the one component allowed to default to zero, so the all-in formula
+    already reads correctly once K1 lands and starts populating it.
+
+    `llm_cost_usd is None` or `elevenlabs_cost_fiat is None` -> None out: a call not yet
+    reconciled with ElevenLabs, or with no priced LLM usage, has an UNKNOWN all-in cost, never a
+    partial total presented as the whole story. Chat calls, which never touch ElevenLabs, pass
+    `elevenlabs_cost_fiat=0.0` (never None) so their all-in cost is exactly their LLM cost --
+    see reporting.py, which is the only caller and decides which zero is real per channel.
+    """
+    if llm_cost_usd is None or elevenlabs_cost_fiat is None:
+        return None
+    return round(
+        llm_cost_usd
+        + elevenlabs_cost_fiat
+        + (telephony_minutes or 0.0) * TELEPHONY_RATE_USD_PER_MINUTE,
+        6,
+    )
