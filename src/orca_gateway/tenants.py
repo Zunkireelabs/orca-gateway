@@ -77,6 +77,14 @@ class ChannelConfig(BaseModel):
     phone_guard: bool = False
     allowed_phone_numbers: list[str] = Field(default_factory=list)
     phone_guard_message: str | None = None
+    # P4 gateway-polish brief A3: built-in messages (kill_switch/error_fallback/phone_guard) speak
+    # in the CALLER's language instead of always default_language. Off = today's behaviour exactly.
+    caller_language_messages: bool = False
+    # P4 gateway-polish brief A4: a "..." silence turn is answered by the gateway itself -- a
+    # canned nudge, no backend call, not a billable turn. Off = today's behaviour (the backend
+    # sees the silence turn and answers it, in English, itself).
+    silence_nudge: bool = False
+    silence_nudge_message: str | None = None
 
     @field_validator("allowed_phone_numbers")
     @classmethod

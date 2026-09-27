@@ -462,6 +462,9 @@ async def config_save(
                 n.strip() for n in (form.get("allowed_phone_numbers") or "").split(",") if n.strip()
             ],
             phone_guard_message=(form.get("phone_guard_message") or "").strip() or None,
+            caller_language_messages="caller_language_messages" in form,
+            silence_nudge="silence_nudge" in form,
+            silence_nudge_message=(form.get("silence_nudge_message") or "").strip() or None,
         )
         # Validate the WHOLE form (both writes) before touching the database: update_channel_config
         # validates again internally, but that is after update_tenant_timezone would already have
