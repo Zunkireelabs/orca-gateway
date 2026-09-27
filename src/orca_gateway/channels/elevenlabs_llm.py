@@ -32,7 +32,7 @@ from orca_gateway import deps
 from orca_gateway.channels.number_speech import verbalize
 from orca_gateway.coalescer import ClientGoneError, StaleTurnError, TurnCoalescer
 from orca_gateway.config import get_settings
-from orca_gateway.messages import spoken_message
+from orca_gateway.messages import caller_language, spoken_message
 from orca_gateway.phone_guard import guard_phone_numbers
 from orca_gateway.seam import Identity
 from orca_gateway.tenant_concurrency import TenantConcurrencyLimiter
@@ -152,6 +152,26 @@ def _user_texts(messages: list[dict]) -> list[str]:
         if isinstance(content, str):
             texts.append(content)
     return texts
+
+
+# P4 gateway-polish brief A4: strict on purpose -- never swallow a real short utterance. Only
+# dots/ellipsis/whitespace, with at least one literal '.' or '…' present; a word, a digit, or a
+# bare "?" all fail this and go to the backend as before.
+_SILENCE_CHARS = re.compile(r"^[\s.…]+$")
+
+
+def _is_silence_turn(text: str) -> bool:
+    stripped = text.strip()
+    return bool(stripped) and _SILENCE_CHARS.fullmatch(stripped) is not None
+
+
+def _last_substantive_user_text(messages: list[dict]) -> str | None:
+    """The most recent non-silence user turn, for the silence nudge's language (A4). The current
+    (silence) turn is itself skipped by `_is_silence_turn`, so no explicit exclusion is needed."""
+    for text in reversed(_user_texts(messages)):
+        if text.strip() and not _is_silence_turn(text):
+            return text
+    return None
 
 
 _STUB_ANSWER = "This is a stub reply for the timeout test."
@@ -290,10 +310,13 @@ async def chat_completions(request: Request):
         if voice_ch is not None and voice_ch.phone_guard:
             # P4 A3: BEFORE number speech, which would turn a digit string into words that can no
             # longer be compared. Replaces, never passes through; counts only, never a digit.
+            phone_guard_lang = (
+                caller_language(turn, voice_ch) if voice_ch.caller_language_messages else None
+            )
             guarded = guard_phone_numbers(
                 spoken,
                 voice_ch.allowed_phone_numbers,
-                spoken_message("phone_guard", voice_ch),
+                spoken_message("phone_guard", voice_ch, lang=phone_guard_lang),
                 # a number the caller said in this call may be read back to them
                 caller_texts=_user_texts(messages),
             )
@@ -381,7 +404,11 @@ async def chat_completions(request: Request):
             raise HTTPException(403, "tenant unavailable") from None
         # P4 A1: this channel opted in to being HEARD when killed. Same refusal, same call close
         # above, but through the normal spoken path: a 403 is silence on a phone.
-        return speak(TurnResult(answer=spoken_message("kill_switch", killed), usage=None), cfg)
+        kill_lang = caller_language(turn, killed) if killed.caller_language_messages else None
+        return speak(
+            TurnResult(answer=spoken_message("kill_switch", killed, lang=kill_lang), usage=None),
+            cfg,
+        )
     except TenantStoreError:
         log.exception("tenant config unreachable slug=%s", slug)
         raise HTTPException(503, "tenant config unavailable") from None
@@ -592,6 +619,24 @@ async def chat_completions(request: Request):
             coalescer={"requests": 1, "not_coalesced": 1},
         )
         result = TurnResult(answer=closed_text, usage=None)
+    elif ch.silence_nudge and _is_silence_turn(turn):
+        # P4 gateway-polish brief A4: a "..." turn is answered by the gateway itself -- no
+        # backend call, not coalesced (same low-stakes duplicate-request accuracy tradeoff as
+        # out_of_hours above), and not billable (usage=None). The nudge speaks in the last
+        # substantive turn's language, since "..." has no language of its own.
+        log_arrival("not_coalesced")
+        prior = _last_substantive_user_text(messages)
+        nudge_lang = caller_language(prior, ch) if prior else ch.default_language.split("-")[0].lower()
+        nudge_text = spoken_message("silence_nudge", ch, lang=nudge_lang)
+        await touch()
+        await complete(
+            usage=None,
+            user_text=turn,
+            answer=nudge_text,
+            ended_by="silence",
+            coalescer={"requests": 1, "not_coalesced": 1},
+        )
+        result = TurnResult(answer=nudge_text, usage=None)
     else:
         try:
             result = await get_coalescer().submit(
@@ -620,7 +665,8 @@ async def chat_completions(request: Request):
             # P4 A1: a run timeout or backend error is SPOKEN, so the caller hears something and
             # can retry. Recorded as an 'error' turn; duplicate raw requests of one failed turn
             # each land here, and complete_turn is unique on (call, depth), so it counts once.
-            fallback = spoken_message("error_fallback", ch)
+            error_lang = caller_language(turn, ch) if ch.caller_language_messages else None
+            fallback = spoken_message("error_fallback", ch, lang=error_lang)
             await complete(usage=None, user_text=turn, answer=fallback, ended_by="error")
             result = TurnResult(answer=fallback, usage=None)
 

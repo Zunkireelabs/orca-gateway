@@ -139,6 +139,21 @@
 <textarea name="error_fallback_message" rows="2">{{ ch.error_fallback_message or '' }}</textarea>
 <div class="field-note">Off = today's behaviour (a refusal / 502, which a caller hears as silence).
   Voice only: chat's kill switch and error paths are unchanged.</div>
+<label><input type="checkbox" name="caller_language_messages" style="width:auto;display:inline;" {% if ch.caller_language_messages %}checked{% endif %}> Speak these built-in messages in the caller's own language</label>
+<div class="field-note">Off = today's behaviour (default language only, for every caller). On = a
+  Devanagari caller turn hears the Nepali wording, a Latin-script caller hears English (if this
+  channel serves it), regardless of default language. A message override above is always spoken
+  verbatim, in either case.</div>
+</fieldset>
+
+<fieldset>
+<legend>Silence nudge (voice)</legend>
+<label><input type="checkbox" name="silence_nudge" style="width:auto;display:inline;" {% if ch.silence_nudge %}checked{% endif %}> Answer a silent turn ("...") with a nudge instead of calling the backend</label>
+<label>Nudge message <span class="field-note">blank = built-in wording, in the last substantive turn's language (or the default language if there wasn't one)</span></label>
+<textarea name="silence_nudge_message" rows="2">{{ ch.silence_nudge_message or '' }}</textarea>
+<div class="field-note">Off = today's behaviour (a silence turn is sent to the backend like any
+  other). On = a turn that is only dots/ellipsis/whitespace is answered by the gateway itself, not
+  billed, and not sent to the backend. A real short turn ("Yes.", "?") is unaffected.</div>
 </fieldset>
 
 <fieldset>
