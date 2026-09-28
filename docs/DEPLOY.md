@@ -120,6 +120,11 @@ copied from stage's** (D6; also closes a hygiene item: the stage console secret 
 two transcripts). `VPS_HOST`/`VPS_USER`/`VPS_SSH_KEY` are shared with stage (same VPS). **Sadin
 sets these**; the Window verifies by **name only** (`gh secret list`), never a value.
 
+`ELEVENLABS_API_KEY` (P6): read only by the manual `python -m orca_gateway.reconcile` CLI, never
+by the deployed container's request path. Read-only scope on the ElevenLabs side if available.
+Not part of the deploy's rendered `.env` — **Sadin sets it and runs any prod reconciliation pull
+himself**, same as any other prod op, even though the CLI is read-only against the vendor.
+
 ### Runtime config (prod) (rendered into `.env`)
 
 | Var | Value | Note |

@@ -68,20 +68,68 @@ requires the per-conversation GET above, one call per `conversation_id`.
 **The join, concretely:** for each `orca_gw.calls` row, call the per-conversation endpoint with
 `conversation_id` (this gateway's own `conversation_id` IS ElevenLabs' `conversation_id` — it is
 derived from the same `traceparent` ElevenLabs sends on every turn) and write `stt_minutes` /
-`tts_characters` back in. **Not built in this slice** (S5 brief §5: no pricing/reconciliation
-*service* — this documents the procedure; a script or console action can automate the pull later,
-sized once S6 exists). Until automated, the manual procedure is: for the calls in a reconciliation
-window, `GET` each `conversation_id` from that endpoint and update the two columns, or cross-check
-totals against ElevenLabs' own Monitor → Conversations / usage dashboard.
+`tts_characters` / `elevenlabs_cost_fiat` back in.
+
+**Built in P6** (`orca_gateway/reconcile.py`) — no longer a manual procedure. Run:
+
+    python -m orca_gateway.reconcile --since 2026-09-01 [--tenant dental-city]
+
+reading `ELEVENLABS_API_KEY` from the environment (never printed, never hardcoded; a prod pull is
+Sadin's own `!` action — see the P6 brief §6 Q3, even though the CLI is read-only against both the
+vendor and this gateway's own call path: it only ever overwrites `stt_minutes`, `tts_characters`
+and `elevenlabs_cost_fiat` on rows that already exist). One GET per conversation, serialized with a
+short pause between calls (pilot volume is tiny — this is not meant to scale), idempotent (a
+re-run overwrites the same three columns with whatever the vendor reports right now), and it never
+raises on one bad conversation: that row is counted separately (`not_found` / `errors`) so a single
+stale id can't abort the whole window. Cross-checking totals against ElevenLabs' own Monitor →
+Conversations / usage dashboard remains a good sanity check even once this is automated.
 
 **What this gateway guarantees today regardless of automation:** every `orca_gw.calls` row carries
 `conversation_id` and (when the tenant's `elevenlabs_agent_id` is configured) `elevenlabs_agent_id`
 — the only two keys this join will ever need.
 
+### The double-count trap and `cost_fiat`'s composition (P6 §3.2/§3.3, owed from S5)
+
+Because ElevenLabs calls our **Custom LLM** (Orca → Zunkiree → *our* OpenAI key), the LLM tokens
+bill to **our own** OpenAI account — `llm_cost_usd` already captures that cost in full. ElevenLabs'
+`cost_fiat` is therefore *expected* to be its own platform price (STT + TTS + its per-minute),
+with a $0 or absent LLM line, since it never actually pays for or resells our tokens. **Decided
+(P6 brief §6 Q2, resolved by Sadin): trust `cost_fiat` as-is, stored verbatim in the new
+`calls.elevenlabs_cost_fiat` column, and add it to `llm_cost_usd` for the all-in total
+(`cost.all_in_cost_usd`) without adjustment.**
+
+This is the recommended, expected-correct composition — **it is still owed a live confirmation**:
+the "10-call reconciliation" the P6 brief calls for (run `reconcile.py` over ~10 real pilot calls,
+then compare the computed all-in cost to `cost_fiat` and to ElevenLabs' own Monitor → usage
+dashboard) has not been run as of this PR — there is no `ELEVENLABS_API_KEY` or real pilot-call
+data available in the environment that built this slice, and a pull against real conversations is
+Sadin's own `!` action regardless (§6 Q3). **Record the result here once it's run:** if `cost_fiat`
+turns out to bundle a nonzero LLM figure under a Custom LLM, `all_in_cost_usd` is double-counting
+the LLM and this section (plus `cost.all_in_cost_usd`'s docstring) must be updated to subtract or
+exclude that portion before the panel's numbers are trusted for Dental City's margin line.
+
+*(2026-09-27, P6 build session: not yet run. — the next `!`-run reconciliation should append its
+finding here: date, tenant(s), call count, and whether `cost_fiat` included an LLM line.)*
+
 ## Telephony minutes (`telephony_minutes`)
 
 Zero by design. No telephony connector exists (K1 open). The column exists so the schema doesn't
-change shape when one lands.
+change shape when one lands. `cost.all_in_cost_usd` and the Cost panel's `cost_per_minute` both
+exclude real telephony cost until then and must keep saying so — once a connector exists, the
+all-in total (and the client-facing per-minute number) would otherwise silently understate cost.
+
+## Known gaps in metering (P6 brief §4 — documented, not fixed here)
+
+- **A refused (kill-switched) call leaves no `calls`/`turns` row at all** (banked s55): a turn
+  refused by `require_serving`'s kill-switch check never reaches `touch_call`/`record_turn`, so it
+  is invisible to the Calls panel, the Cost panel, and this reconciliation. Fixing this is a
+  separate metering change (a refused-call row would need writing before the refusal, not after) —
+  out of scope for P6.
+- **`abandoned_run_count`** is a real cost with an unknown dollar figure (usage only arrives on a
+  completed stream — see above). It sets a **floor**, not the true cost: a tenant-month with
+  abandoned runs has a real all-in cost at or above what this panel shows, never exactly what it
+  shows.
+- **Telephony is 0 until K1** (immediately above) — the same floor logic applies once it lands.
 
 ## "Ended" (`ended_at`, `ended_reason`)
 

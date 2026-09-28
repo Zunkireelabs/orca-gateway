@@ -232,6 +232,49 @@ class PgCallsRepository:
                 (cost, call["id"]),
             )
 
+    async def calls_needing_reconciliation(
+        self, *, since: date, tenant_slug: str | None = None
+    ) -> list[dict]:
+        """P6 §3.1: the window `reconcile.py` pulls for. Voice only -- chat never touches
+        ElevenLabs, so its cost is LLM-only and already correct (brief §7). Every returned row
+        already carries `conversation_id`, the only key the per-conversation ElevenLabs join
+        needs (docs/metering-reconciliation.md); re-included even once reconciled, so a re-run
+        stays idempotent rather than needing its own "already done" tracking."""
+        where = ["c.channel = 'voice'", "c.started_at >= %s"]
+        params: list = [since]
+        if tenant_slug:
+            where.append("t.slug = %s")
+            params.append(tenant_slug)
+        async with await self._connect() as conn:
+            cur = await conn.execute(
+                "select c.conversation_id, t.slug as tenant_slug "
+                "from orca_gw.calls c join orca_gw.tenants t on t.id = c.tenant_id "
+                f"where {' and '.join(where)} order by c.started_at",
+                params,
+            )
+            return await cur.fetchall()
+
+    async def record_elevenlabs_meters(
+        self,
+        *,
+        conversation_id: str,
+        stt_minutes: float | None,
+        tts_characters: int | None,
+        elevenlabs_cost_fiat: float | None,
+    ) -> bool:
+        """The reconcile CLI's only write: overwrites these three columns with whatever
+        ElevenLabs reports NOW, on THIS call row only -- never any other column, never the call
+        path. Idempotent by construction (a re-run with the same source data writes the same
+        values). Returns False if `conversation_id` isn't a call this gateway has a row for."""
+        async with await self._connect() as conn:
+            cur = await conn.execute(
+                "update orca_gw.calls set stt_minutes = %s, tts_characters = %s, "
+                "elevenlabs_cost_fiat = %s, updated_at = now() where conversation_id = %s "
+                "returning id",
+                (stt_minutes, tts_characters, elevenlabs_cost_fiat, conversation_id),
+            )
+            return (await cur.fetchone()) is not None
+
     async def user_texts(self, conversation_id: str, limit: int = 100) -> list[str]:
         """What the caller said in this conversation so far (most recent `limit` stored turns).
         PII: used in memory only (the phone guard), never logged."""

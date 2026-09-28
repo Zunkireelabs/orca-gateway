@@ -344,3 +344,89 @@ async def test_user_texts_returns_only_this_conversations_stored_user_turns(repo
     assert await repo.user_texts("conv-a") == ["two", "one"]
     assert await repo.user_texts("conv-a", limit=1) == ["two"]
     assert await repo.user_texts("nope") == []
+
+
+# ---- P6: the ElevenLabs reconciliation write-back ---------------------------------------------
+
+
+async def test_calls_needing_reconciliation_is_voice_only_and_respects_since_and_tenant(
+    repo, tenant, pg_url
+):
+    import datetime
+
+    from orca_gateway.tenant_repo import PgTenantRepository
+    from tests.tenant_fixtures import quiet_spa
+
+    await PgTenantRepository(pg_url).upsert(quiet_spa())
+    await _one_call(repo, tenant, "conv-voice-1")  # voice, dental-city
+    await repo.touch_call(  # chat, dental-city -- never ElevenLabs' concern
+        tenant_slug=tenant,
+        channel="chat",
+        conversation_id="conv-chat-1",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+    await repo.touch_call(  # voice, a different tenant
+        tenant_slug="quiet-spa",
+        channel="voice",
+        conversation_id="conv-voice-2",
+        agent_id="concierge",
+        elevenlabs_agent_id=None,
+    )
+
+    since = datetime.date(2020, 1, 1)
+    rows = await repo.calls_needing_reconciliation(since=since)
+    assert {r["conversation_id"] for r in rows} == {"conv-voice-1", "conv-voice-2"}
+
+    scoped = await repo.calls_needing_reconciliation(since=since, tenant_slug="dental-city")
+    assert [r["conversation_id"] for r in scoped] == ["conv-voice-1"]
+
+    future = datetime.date(2099, 1, 1)
+    assert await repo.calls_needing_reconciliation(since=future) == []
+
+
+async def test_record_elevenlabs_meters_writes_the_three_columns_and_is_idempotent(
+    repo, tenant, pg_url
+):
+    await _one_call(repo, tenant, "conv-el-1")
+
+    ok = await repo.record_elevenlabs_meters(
+        conversation_id="conv-el-1",
+        stt_minutes=0.79,
+        tts_characters=842,
+        elevenlabs_cost_fiat=0.083,
+    )
+    assert ok is True
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select stt_minutes, tts_characters, elevenlabs_cost_fiat from orca_gw.calls "
+            "where conversation_id = %s",
+            ("conv-el-1",),
+        ).fetchone()
+    assert (float(row[0]), row[1], float(row[2])) == (0.79, 842, 0.083)
+
+    # a re-run (the CLI's normal shape) overwrites with the same source values -- idempotent
+    again = await repo.record_elevenlabs_meters(
+        conversation_id="conv-el-1",
+        stt_minutes=0.79,
+        tts_characters=842,
+        elevenlabs_cost_fiat=0.083,
+    )
+    assert again is True
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select stt_minutes, tts_characters, elevenlabs_cost_fiat from orca_gw.calls "
+            "where conversation_id = %s",
+            ("conv-el-1",),
+        ).fetchone()
+    assert (float(row[0]), row[1], float(row[2])) == (0.79, 842, 0.083)
+
+
+async def test_record_elevenlabs_meters_returns_false_for_unknown_conversation(repo):
+    ok = await repo.record_elevenlabs_meters(
+        conversation_id="does-not-exist",
+        stt_minutes=1.0,
+        tts_characters=10,
+        elevenlabs_cost_fiat=0.01,
+    )
+    assert ok is False

@@ -302,6 +302,27 @@ async def test_cost_export_csv_marks_overstated_rows(client, tenant, pg_url):
     assert body_row.split(",")[-1] == "True"
 
 
+async def test_cost_panel_shows_per_channel_meters_and_all_in_cost(client, tenant, pg_url):
+    await _seed_call(pg_url, tenant, conversation_id="conv-console-p6")
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute(
+            "update orca_gw.calls set elevenlabs_cost_fiat = 0.04, stt_minutes = 0.3, "
+            "tts_characters = 200 where conversation_id = 'conv-console-p6'"
+        )
+    _login(client)
+    resp = client.get("/console/cost")
+    assert resp.status_code == 200
+    assert "voice" in resp.text  # the per-channel column, not just a per-tenant row
+    assert "Not yet reconciled" in resp.text
+    assert "All-in known cost" in resp.text
+
+    csv_resp = client.get("/console/cost/export.csv")
+    header = csv_resp.text.splitlines()[0]
+    assert "all_in_cost_usd" in header and "elevenlabs_cost_fiat" in header
+    body_row = next(r for r in csv_resp.text.splitlines()[1:] if "conv-console-p6" in r)
+    assert "0.04" in body_row
+
+
 # ---- panel 4: config ------------------------------------------------------------------------
 
 
