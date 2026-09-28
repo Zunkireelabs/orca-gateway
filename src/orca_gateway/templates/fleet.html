@@ -9,6 +9,43 @@
   (abandoned runs or ended_reason = error). See the highlighted rows below.
 </div>
 {% endif %}
+
+<h2>Agents</h2>
+<p class="sub">One agent, defined once, used by however many tenants and channels hire it.</p>
+<table>
+<thead><tr>
+  <th>Agent</th><th>Class</th><th>Owning product</th><th>Ver</th><th>Kill</th><th>Used by</th><th></th>
+</tr></thead>
+<tbody>
+{% for a in agents %}
+<tr>
+  <td>{{ a.display_name }} <span class="muted">(<code>{{ a.name }}</code>)</span></td>
+  <td>{{ a.agent_class }}</td>
+  <td>{{ a.owning_product }}</td>
+  <td>{{ a.version }}</td>
+  <td>{% if a.kill_switch %}<span class="badge-on">ON</span>{% else %}<span class="badge-off">off</span>{% endif %}</td>
+  <td>
+    {% if a.used_by %}
+      {% for u in a.used_by %}{{ u.display_name }} ({{ u.tenant_slug }}) · {{ u.channel }}{% if not loop.last %}, {% endif %}{% endfor %}
+    {% else %}
+      <span class="muted">—</span>
+    {% endif %}
+  </td>
+  <td>
+    <form method="post" action="/console/fleet/agents/toggle" class="inline"
+          onsubmit="return confirm('{{ 'Turn OFF' if a.kill_switch else 'Turn ON' }} the kill switch for agent {{ a.name }} — this refuses it on EVERY tenant and channel listed above?');">
+      <input type="hidden" name="csrf_token" value="{{ session }}">
+      <input type="hidden" name="agent_name" value="{{ a.name }}">
+      <input type="hidden" name="on" value="{{ 'false' if a.kill_switch else 'true' }}">
+      <button type="submit">{{ 'Turn agent kill switch off' if a.kill_switch else 'Turn agent kill switch on' }}</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<h2>Tenant × channel</h2>
 <table>
 <thead><tr>
   <th>Tenant</th><th>Channel</th><th>Agent ID</th><th>Enabled</th><th>Kill switch</th>

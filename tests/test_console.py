@@ -171,6 +171,54 @@ async def test_kill_switch_toggle_writes_audit_row_and_is_effective_immediately(
     assert rows and rows[0][0] == "kill_switch"
 
 
+async def test_fleet_lists_agents_and_kill_switch_toggle_refuses_every_channel_it_serves(
+    client, tenant, pg_url
+):
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        agent_id = conn.execute(
+            "insert into orca_gw.agents (name, display_name, class) "
+            "values ('front-desk', 'Front Desk', 'public_receptionist') returning id"
+        ).fetchone()[0]
+    repo = PgTenantRepository(pg_url)
+    dc = await repo.load("dental-city")
+    dc.channels["voice"].agent_ref = agent_id
+    await repo.upsert(dc)
+
+    _login(client)
+    resp = client.get("/console/fleet")
+    assert resp.status_code == 200
+    assert "Front Desk" in resp.text and "public_receptionist" in resp.text
+    assert "dental-city" in resp.text  # the "Used by" column
+
+    csrf = _csrf(client)
+    post = client.post(
+        "/console/fleet/agents/toggle",
+        data={"csrf_token": csrf, "agent_name": "front-desk", "on": "true"},
+        follow_redirects=False,
+    )
+    assert post.status_code == 303
+
+    cfg = await deps.get_tenant_store().get(tenant)  # invalidated, so this reflects it now
+    assert cfg.channels["voice"].agent.kill_switch is True
+    with psycopg.connect(pg_url) as conn:
+        rows = conn.execute(
+            "select action, before, after from orca_gw.config_audit "
+            "where action = 'agent_kill_switch' order by at desc limit 1"
+        ).fetchall()
+    assert rows and rows[0][2]["kill_switch"] is True
+
+
+async def test_fleet_agent_toggle_404s_for_an_unknown_agent(client, tenant):
+    _login(client)
+    csrf = _csrf(client)
+    resp = client.post(
+        "/console/fleet/agents/toggle",
+        data={"csrf_token": csrf, "agent_name": "no-such-agent", "on": "true"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 404
+
+
 # ---- panel 2: calls -------------------------------------------------------------------------
 
 

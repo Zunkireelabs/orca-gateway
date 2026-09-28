@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from orca_gateway.tenants import (
+    AgentConfig,
     TenantConfig,
     TenantStore,
     TenantStoreError,
@@ -49,6 +50,35 @@ def test_inactive_disabled_and_killed_all_fail_closed():
 
 def test_healthy_tenant_passes_the_gate():
     assert require_serving(dental_city(), "voice").agent_id == "front-desk"
+
+
+def _agent(**over) -> AgentConfig:
+    base = dict(
+        id="11111111-1111-1111-1111-111111111111",
+        name="front-desk",
+        display_name="Front Desk",
+        agent_class="public_receptionist",
+    )
+    base.update(over)
+    return AgentConfig(**base)
+
+
+# ---- P5: the agent's own kill switch ---------------------------------------------------------
+def test_agent_kill_switch_refuses_even_though_the_channel_switch_is_off():
+    cfg = dental_city()
+    cfg.channels["voice"].agent = _agent(kill_switch=True)
+    assert cfg.channels["voice"].kill_switch is False  # the channel switch, untouched
+    with pytest.raises(TenantUnavailableError, match="agent kill switch on"):
+        require_serving(cfg, "voice")
+
+
+def test_agent_kill_switch_off_and_unresolved_both_pass_the_gate():
+    cfg = dental_city()
+    cfg.channels["voice"].agent = _agent(kill_switch=False)
+    assert require_serving(cfg, "voice").agent_id == "front-desk"
+    cfg2 = dental_city()  # agent never resolved (e.g. no in-memory join) -- no regression
+    assert cfg2.channels["voice"].agent is None
+    assert require_serving(cfg2, "voice").agent_id == "front-desk"
 
 
 # ---- availability (channel, not the product's own schedule) --------------------------------

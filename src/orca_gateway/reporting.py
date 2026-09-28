@@ -112,6 +112,37 @@ class Reporting:
                 r["known_spend_today"] = float(r["known_spend_today"] or 0)
             return rows
 
+    async def agent_rows(self) -> list[dict]:
+        """Fleet 'Agents' section (P5 brief §6): every `orca_gw.agents` row -- the shared,
+        platform-level object §2.3 is about -- with the tenant×channels that reference it via
+        `agent_ref`. An agent nothing currently references is still listed, with `used_by = []`
+        (never hidden: the kill switch still exists and might be flipped ahead of a rollout)."""
+        async with await self._connect() as conn:
+            cur = await conn.execute(
+                "select id, name, display_name, class as agent_class, owning_product, "
+                "version, kill_switch from orca_gw.agents order by name"
+            )
+            agents = await cur.fetchall()
+            cur = await conn.execute(
+                "select tc.agent_ref, t.slug as tenant_slug, t.display_name, tc.channel "
+                "from orca_gw.tenant_channels tc "
+                "join orca_gw.tenants t on t.id = tc.tenant_id "
+                "where tc.agent_ref is not null "
+                "order by t.slug, tc.channel"
+            )
+            used_by: dict = {}
+            for row in await cur.fetchall():
+                used_by.setdefault(row["agent_ref"], []).append(
+                    {
+                        "tenant_slug": row["tenant_slug"],
+                        "display_name": row["display_name"],
+                        "channel": row["channel"],
+                    }
+                )
+            for a in agents:
+                a["used_by"] = used_by.get(a["id"], [])
+            return agents
+
     async def list_calls(
         self, *, tenant_slug: str | None = None, on_date: str | None = None, limit: int = 200
     ) -> list[dict]:
