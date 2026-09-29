@@ -242,6 +242,19 @@ async def chat_completions(request: Request):
     log = logging.getLogger("orca_gateway.channels.elevenlabs_llm")
     stub = _stub_params(request)
 
+    if get_settings().voice_log_request_shape_enabled:
+        # P6 Fix A verify (brief §4), TEMPORARY: header NAMES and top-level body KEYS only --
+        # never values, a turn can carry caller PII. Answers one question: does ElevenLabs send
+        # its own conversation id to the Custom LLM (a header like xi-conversation-id, or a body
+        # field)? Remove this block (and the flag in config.py) once that's answered.
+        log.info(
+            "voice request shape probe (P6 Fix A verify, TEMPORARY) conversation=%s "
+            "header_names=%s body_keys=%s",
+            conversation_id,
+            sorted(request.headers.keys()),
+            sorted(body.keys()),
+        )
+
     def log_leg(leg: str, mono: float) -> None:
         # Diagnostic-only timing points (latency breakdown brief §1), correlated with the
         # arrival log line by conversation_id + depth + span, and with each other by mono

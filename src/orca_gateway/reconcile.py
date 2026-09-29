@@ -110,15 +110,44 @@ class ElevenLabsClient:
         await self._client.aclose()
 
 
-def parse_charging(charging: dict) -> tuple[float | None, int | None, float | None]:
+def parse_charging(
+    charging: dict, *, conversation_id: str | None = None
+) -> tuple[float | None, int | None, float | None]:
     """(stt_minutes, tts_characters, elevenlabs_cost_fiat) from one conversation's
     `metadata.charging`. A field ElevenLabs didn't send stays None -- never guessed at zero (same
-    rule as every other meter in this gateway)."""
+    rule as every other meter in this gateway).
+
+    P6 Follow-up C (brief §8, session 60 prod finding): the S5 doc invented a `cost_fiat` field --
+    ElevenLabs' real payload has no such key, so this used to always return None. The real
+    platform-dollar figure is `platform_price` (verified on a real prod conversation); it is
+    written into the existing `elevenlabs_cost_fiat` column -- only the SOURCE field changes, not
+    the column. `platform_charge`/`call_charge` are the same cost in ElevenLabs credits (a
+    cross-check against the credit dashboard) -- logged, not persisted, since no meter needs them
+    today. `llm_price` should be 0 here (ElevenLabs' Custom LLM bills to our own OpenAI key, never
+    ElevenLabs) -- a non-zero value would mean ElevenLabs started pricing the LLM leg and
+    `all_in` cost would start double-counting it, so that's logged as a warning rather than
+    silently trusted."""
     asr_seconds = (charging.get("asr_usage") or {}).get("total_audio_input_seconds")
     stt_minutes = None if asr_seconds is None else round(asr_seconds / 60.0, 2)
     tts_characters = (charging.get("tts_usage") or {}).get("total_characters")
-    cost_fiat = charging.get("cost_fiat")
-    return stt_minutes, tts_characters, cost_fiat
+    platform_price = charging.get("platform_price")
+
+    llm_price = charging.get("llm_price")
+    if llm_price:
+        logger.warning(
+            "ElevenLabs charging.llm_price is non-zero (%s) for conversation=%s -- the Custom "
+            "LLM leg is expected to bill $0 to ElevenLabs (it bills our own OpenAI key instead); "
+            "a non-zero value means all_in cost may now double-count the LLM leg",
+            llm_price,
+            conversation_id,
+        )
+    logger.info(
+        "elevenlabs charging credits conversation=%s platform_charge=%s call_charge=%s",
+        conversation_id,
+        charging.get("platform_charge"),
+        charging.get("call_charge"),
+    )
+    return stt_minutes, tts_characters, platform_price
 
 
 def match_conversations(
@@ -289,7 +318,7 @@ async def reconcile(
             )
             not_found += 1
             continue
-        stt_minutes, tts_characters, cost_fiat = parse_charging(charging)
+        stt_minutes, tts_characters, cost_fiat = parse_charging(charging, conversation_id=our_id)
         await calls_repo.record_elevenlabs_meters(
             conversation_id=our_id,
             stt_minutes=stt_minutes,

@@ -25,6 +25,12 @@ from orca_gateway.reconcile import (
 SINCE = date(2026, 9, 1)
 SINCE_UNIX = int(datetime(2026, 9, 1, tzinfo=UTC).timestamp())
 
+# P6 Follow-up C: shaped from a REAL verified prod payload
+# (conv_5801m3hah36bf7rb1b5yy3wyn5vp, a 41s dental-city-pilot call, session 60 2026-09-29).
+# ElevenLabs' `metadata.charging` has no `cost_fiat` key at all -- the S5 doc invented it. The
+# real platform-dollar field is `platform_price`; `platform_charge`/`call_charge` are the same
+# cost in ElevenLabs credits; `llm_price`/`llm_charge` are 0 because the Custom LLM bills our own
+# OpenAI key, never ElevenLabs.
 CONVERSATION_PAYLOAD = {
     "conversation_id": "conv_1",
     "agent_id": "front-desk-el-agent",
@@ -32,7 +38,13 @@ CONVERSATION_PAYLOAD = {
         "charging": {
             "tts_usage": {"total_characters": 842, "total_audio_output_seconds": 61.4},
             "asr_usage": {"total_audio_input_seconds": 47.2},
-            "cost_fiat": 0.083,
+            "llm_price": 0.0,
+            "llm_charge": 0,
+            "call_charge": 306,
+            "platform_charge": 306,
+            "platform_price": 0.0552,
+            "free_minutes_consumed": 0.0,
+            "free_llm_dollars_consumed": 0.0,
         }
     },
 }
@@ -141,17 +153,31 @@ def _client(agent_pages: dict[str, list[dict]]) -> ElevenLabsClient:
 # ---- parsing --------------------------------------------------------------------------------
 
 
-def test_parse_charging_converts_seconds_to_minutes_and_passes_cost_fiat_through():
+def test_parse_charging_converts_seconds_to_minutes_and_reads_platform_price_not_cost_fiat():
     charging = CONVERSATION_PAYLOAD["metadata"]["charging"]
     stt_minutes, tts_characters, cost_fiat = parse_charging(charging)
     assert stt_minutes == round(47.2 / 60.0, 2)
     assert tts_characters == 842
-    assert cost_fiat == 0.083
+    assert cost_fiat == 0.0552  # platform_price -- ElevenLabs has no cost_fiat key at all
 
 
 def test_parse_charging_missing_fields_stay_none_not_guessed():
     stt_minutes, tts_characters, cost_fiat = parse_charging({})
     assert (stt_minutes, tts_characters, cost_fiat) == (None, None, None)
+
+
+def test_parse_charging_warns_when_llm_price_is_non_zero(caplog):
+    charging = dict(CONVERSATION_PAYLOAD["metadata"]["charging"], llm_price=0.02)
+    with caplog.at_level("WARNING", logger="orca_gateway.reconcile"):
+        parse_charging(charging, conversation_id="our-1")
+    assert any("llm_price" in record.message for record in caplog.records)
+
+
+def test_parse_charging_does_not_warn_when_llm_price_is_zero(caplog):
+    charging = CONVERSATION_PAYLOAD["metadata"]["charging"]
+    with caplog.at_level("WARNING", logger="orca_gateway.reconcile"):
+        parse_charging(charging, conversation_id="our-1")
+    assert not any("llm_price" in record.message for record in caplog.records)
 
 
 # ---- matching ---------------------------------------------------------------------------------
@@ -221,7 +247,7 @@ async def test_reconcile_lists_matches_and_writes_back_meters_and_conv_id():
             "conversation_id": "our-1",
             "stt_minutes": round(47.2 / 60.0, 2),
             "tts_characters": 842,
-            "elevenlabs_cost_fiat": 0.083,
+            "elevenlabs_cost_fiat": 0.0552,
             "elevenlabs_conversation_id": "conv_1",
         }
     ]
