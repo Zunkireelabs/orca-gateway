@@ -430,3 +430,68 @@ async def test_record_elevenlabs_meters_returns_false_for_unknown_conversation(r
         elevenlabs_cost_fiat=0.01,
     )
     assert ok is False
+
+
+async def test_calls_needing_reconciliation_includes_agent_id_and_null_conv_id(repo, tenant):
+    """P6 Fix B: a null elevenlabs_agent_id row still comes back (reconcile.py -- not this
+    query -- is the one that counts it unmatchable), and elevenlabs_agent_id /
+    elevenlabs_conversation_id / started_at / ended_at / turn_count are all present for matching."""
+    import datetime
+
+    await repo.touch_call(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-with-agent",
+        agent_id="front-desk",
+        elevenlabs_agent_id="el-agent-1",
+    )
+    await repo.touch_call(
+        tenant_slug=tenant,
+        channel="voice",
+        conversation_id="conv-no-agent",
+        agent_id="front-desk",
+        elevenlabs_agent_id=None,
+    )
+
+    rows = await repo.calls_needing_reconciliation(since=datetime.date(2020, 1, 1))
+    by_id = {r["conversation_id"]: r for r in rows}
+    assert by_id["conv-with-agent"]["elevenlabs_agent_id"] == "el-agent-1"
+    assert by_id["conv-with-agent"]["elevenlabs_conversation_id"] is None
+    assert by_id["conv-no-agent"]["elevenlabs_agent_id"] is None
+    for row in rows:
+        assert "started_at" in row and "turn_count" in row and "ended_at" in row
+
+
+async def test_record_elevenlabs_meters_stores_and_keeps_elevenlabs_conversation_id(
+    repo, tenant, pg_url
+):
+    await _one_call(repo, tenant, "conv-el-2")
+
+    await repo.record_elevenlabs_meters(
+        conversation_id="conv-el-2",
+        stt_minutes=0.5,
+        tts_characters=100,
+        elevenlabs_cost_fiat=0.02,
+        elevenlabs_conversation_id="conv_real_1",
+    )
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select elevenlabs_conversation_id from orca_gw.calls where conversation_id = %s",
+            ("conv-el-2",),
+        ).fetchone()
+    assert row[0] == "conv_real_1"
+
+    # a later write with no elevenlabs_conversation_id (already stored, no re-listing needed)
+    # must not clobber the one already on record.
+    await repo.record_elevenlabs_meters(
+        conversation_id="conv-el-2",
+        stt_minutes=0.6,
+        tts_characters=110,
+        elevenlabs_cost_fiat=0.03,
+    )
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select elevenlabs_conversation_id from orca_gw.calls where conversation_id = %s",
+            ("conv-el-2",),
+        ).fetchone()
+    assert row[0] == "conv_real_1"

@@ -65,10 +65,26 @@ There is also `GET /v1/convai/conversations` (list, filterable by `agent_id`) fo
 tenant's conversations in a window, but it does **not** carry the cost/usage breakdown — that
 requires the per-conversation GET above, one call per `conversation_id`.
 
-**The join, concretely:** for each `orca_gw.calls` row, call the per-conversation endpoint with
-`conversation_id` (this gateway's own `conversation_id` IS ElevenLabs' `conversation_id` — it is
-derived from the same `traceparent` ElevenLabs sends on every turn) and write `stt_minutes` /
-`tts_characters` / `elevenlabs_cost_fiat` back in.
+**The join, concretely — corrected in P6 Fix B (`P6-RECONCILE-JOIN-FIX-BRIEF.md`, session 60):**
+this gateway's own `conversation_id` is **not** ElevenLabs' `conversation_id`. It is the W3C
+`traceparent` trace-id (`channels/elevenlabs_llm.py:110`), while ElevenLabs' own ids look like
+`conv_5801m3hah36bf7rb1b5yy3wyn5vp` — proven on prod (a per-conversation GET keyed on our id
+404'd for all 8 dental-city voice calls). There is no shared correlation id on the wire today.
+
+So the join is **list-and-match**, not a direct per-conversation GET on our id: for each voice call
+with an `elevenlabs_agent_id`, list that agent's ElevenLabs conversations
+(`GET /v1/convai/conversations?agent_id=<id>`, paginated) and match to the stored call by nearest
+`start_time_unix_secs` within ±120s, enforcing a unique 1:1 assignment and soft-cross-checking
+against `call_duration_secs`/`message_count`. A call with no match inside tolerance, or an
+ambiguous/duplicate one, is counted `unmatched` and skipped — never guessed. The matched
+`conv_…` id is stored on `calls.elevenlabs_conversation_id` (migration `0012`, additive) so a
+re-run joins directly and skips listing entirely — idempotent and cheap. Only once matched does the
+per-conversation charging GET (above) run, keyed on the real `conv_…` id, and the three meter
+columns are still written back keyed on **our own** `conversation_id` (unique, unchanged).
+
+A future fix (Fix A, not yet built) may let ElevenLabs' Custom LLM request carry its own
+`conv_…` id at request time, which would make the join deterministic and retire this heuristic;
+until then, list-and-match is the mechanism.
 
 **Built in P6** (`orca_gateway/reconcile.py`) — no longer a manual procedure. Run:
 
@@ -76,17 +92,20 @@ derived from the same `traceparent` ElevenLabs sends on every turn) and write `s
 
 reading `ELEVENLABS_API_KEY` from the environment (never printed, never hardcoded; a prod pull is
 Sadin's own `!` action — see the P6 brief §6 Q3, even though the CLI is read-only against both the
-vendor and this gateway's own call path: it only ever overwrites `stt_minutes`, `tts_characters`
-and `elevenlabs_cost_fiat` on rows that already exist). One GET per conversation, serialized with a
-short pause between calls (pilot volume is tiny — this is not meant to scale), idempotent (a
-re-run overwrites the same three columns with whatever the vendor reports right now), and it never
-raises on one bad conversation: that row is counted separately (`not_found` / `errors`) so a single
-stale id can't abort the whole window. Cross-checking totals against ElevenLabs' own Monitor →
-Conversations / usage dashboard remains a good sanity check even once this is automated.
+vendor and this gateway's own call path: it only ever overwrites `elevenlabs_conversation_id`,
+`stt_minutes`, `tts_characters` and `elevenlabs_cost_fiat` on rows that already exist). Listing and
+charging calls are serialized with a short pause between (pilot volume is tiny — this is not meant
+to scale), idempotent (a re-run overwrites the same columns with whatever the vendor reports right
+now, and skips listing when a match already exists), and it never raises on one bad conversation:
+that row is counted separately (`not_found` / `errors` / `unmatchable` / `unmatched`) so a single
+stale id or a missed match can't abort the whole window. Cross-checking totals against ElevenLabs'
+own Monitor → Conversations / usage dashboard remains a good sanity check even once this is
+automated.
 
 **What this gateway guarantees today regardless of automation:** every `orca_gw.calls` row carries
-`conversation_id` and (when the tenant's `elevenlabs_agent_id` is configured) `elevenlabs_agent_id`
-— the only two keys this join will ever need.
+its own unique `conversation_id`, and (when the tenant's `elevenlabs_agent_id` is configured)
+`elevenlabs_agent_id` — the join key list-and-match needs. `elevenlabs_conversation_id` is only
+populated once reconcile has actually matched a row.
 
 ### The double-count trap and `cost_fiat`'s composition (P6 §3.2/§3.3, owed from S5)
 

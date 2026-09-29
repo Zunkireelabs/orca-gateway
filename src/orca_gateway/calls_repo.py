@@ -235,11 +235,16 @@ class PgCallsRepository:
     async def calls_needing_reconciliation(
         self, *, since: date, tenant_slug: str | None = None
     ) -> list[dict]:
-        """P6 §3.1: the window `reconcile.py` pulls for. Voice only -- chat never touches
-        ElevenLabs, so its cost is LLM-only and already correct (brief §7). Every returned row
-        already carries `conversation_id`, the only key the per-conversation ElevenLabs join
-        needs (docs/metering-reconciliation.md); re-included even once reconciled, so a re-run
-        stays idempotent rather than needing its own "already done" tracking."""
+        """P6 Fix B (P6-RECONCILE-JOIN-FIX-BRIEF.md §2.1): the window `reconcile.py` pulls for.
+        Voice only -- chat never touches ElevenLabs, so its cost is LLM-only and already correct
+        (brief §7). Includes voice calls with a null `elevenlabs_agent_id` too -- `reconcile.py`
+        is the one that counts those as `unmatchable` (brief §2.1/§3), not this query, so the
+        summary can report the count instead of the row silently vanishing. Carries
+        `elevenlabs_conversation_id` (our own prior match, if any) so reconcile can join directly
+        and skip list-and-match on a re-run -- the idempotent path. `id`, `started_at`,
+        `ended_at`, `turn_count` are the list-and-match inputs (brief §2.3). Re-included even once
+        reconciled, so a re-run stays idempotent rather than needing its own "already done"
+        tracking."""
         where = ["c.channel = 'voice'", "c.started_at >= %s"]
         params: list = [since]
         if tenant_slug:
@@ -247,7 +252,10 @@ class PgCallsRepository:
             params.append(tenant_slug)
         async with await self._connect() as conn:
             cur = await conn.execute(
-                "select c.conversation_id, t.slug as tenant_slug "
+                "select c.id, c.conversation_id, t.slug as tenant_slug, "
+                "c.elevenlabs_agent_id, c.elevenlabs_conversation_id, "
+                "c.started_at, c.ended_at, c.turn_count, "
+                "c.stt_minutes, c.tts_characters, c.elevenlabs_cost_fiat "
                 "from orca_gw.calls c join orca_gw.tenants t on t.id = c.tenant_id "
                 f"where {' and '.join(where)} order by c.started_at",
                 params,
@@ -261,17 +269,31 @@ class PgCallsRepository:
         stt_minutes: float | None,
         tts_characters: int | None,
         elevenlabs_cost_fiat: float | None,
+        elevenlabs_conversation_id: str | None = None,
     ) -> bool:
-        """The reconcile CLI's only write: overwrites these three columns with whatever
+        """The reconcile CLI's write: overwrites the three meter columns with whatever
         ElevenLabs reports NOW, on THIS call row only -- never any other column, never the call
-        path. Idempotent by construction (a re-run with the same source data writes the same
-        values). Returns False if `conversation_id` isn't a call this gateway has a row for."""
+        path. Keyed on our own `conversation_id` (unchanged, unique) -- never the ElevenLabs
+        lookup id, which is only ever the join key, not the write key (P6 Fix B brief §2.4).
+        `elevenlabs_conversation_id` is optional: when list-and-match found it, it is stored so a
+        re-run joins directly and skips listing (brief §2.5); omitted (None), the column is left
+        as-is via coalesce. Idempotent by construction (a re-run with the same source data writes
+        the same values). Returns False if `conversation_id` isn't a call this gateway has a row
+        for."""
         async with await self._connect() as conn:
             cur = await conn.execute(
                 "update orca_gw.calls set stt_minutes = %s, tts_characters = %s, "
-                "elevenlabs_cost_fiat = %s, updated_at = now() where conversation_id = %s "
+                "elevenlabs_cost_fiat = %s, "
+                "elevenlabs_conversation_id = coalesce(%s, elevenlabs_conversation_id), "
+                "updated_at = now() where conversation_id = %s "
                 "returning id",
-                (stt_minutes, tts_characters, elevenlabs_cost_fiat, conversation_id),
+                (
+                    stt_minutes,
+                    tts_characters,
+                    elevenlabs_cost_fiat,
+                    elevenlabs_conversation_id,
+                    conversation_id,
+                ),
             )
             return (await cur.fetchone()) is not None
 
