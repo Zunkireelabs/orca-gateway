@@ -49,10 +49,13 @@ def all_in_cost_usd(
     telephony_minutes: float | None = None,
 ) -> float | None:
     """LLM (ours, OpenAI, already billed to our account and captured in `llm_cost_usd`) + the
-    vendor's own non-LLM platform price (`elevenlabs_cost_fiat`, trusted as-is per the P6 brief
-    §6 Q2 -- the double-count trap this guards against is adding an LLM figure ElevenLabs' own
-    `cost_fiat` might also carry under a Custom LLM; the 10-call reconciliation in
-    docs/metering-reconciliation.md is what confirms it does not) + telephony (0 until K1).
+    vendor's own non-LLM platform price (`elevenlabs_cost_fiat` -- despite the column name, its
+    SOURCE is ElevenLabs' `platform_price` field, not a `cost_fiat` field, which does not exist
+    in the real payload; see docs/metering-reconciliation.md P6 Follow-up C) + telephony (0 until
+    K1). The double-count trap this guards against -- ElevenLabs' charging also carrying a
+    nonzero `llm_price` under a Custom LLM -- was checked on a real prod conversation (P6
+    Follow-up C, session 60) and confirmed `llm_price = 0`; `reconcile.py`'s `parse_charging`
+    logs a warning if that is ever no longer true.
 
     `telephony_minutes is None` means "zero by design" (0002_calls.sql: no connector exists),
     NOT unknown -- it is the one component allowed to default to zero, so the all-in formula

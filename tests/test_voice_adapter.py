@@ -332,6 +332,28 @@ async def test_the_switch_turns_number_speech_off(wired, monkeypatch):
     assert json.loads(_sse(r.text)[0])["choices"][0]["delta"]["content"] == "मूल्य 1,00,000 छ"
 
 
+async def test_request_shape_probe_is_off_by_default_and_logs_nothing(wired, caplog):
+    """P6 Fix A verify (brief §4): the TEMPORARY probe must stay silent unless explicitly
+    switched on -- never set in prod config."""
+    with caplog.at_level(logging.INFO, logger=ARRIVAL_LOGGER):
+        await _post()
+    assert not [m for m in caplog.messages if m.startswith("voice request shape probe")]
+
+
+async def test_request_shape_probe_logs_header_names_and_body_keys_never_values(
+    wired, monkeypatch, caplog
+):
+    monkeypatch.setenv("ORCA_VOICE_LOG_REQUEST_SHAPE_ENABLED", "true")
+    get_settings.cache_clear()
+    body = _body(user="my phone number is 555-1234")
+    with caplog.at_level(logging.INFO, logger=ARRIVAL_LOGGER):
+        await _post(body=body)
+    line = next(m for m in caplog.messages if m.startswith("voice request shape probe"))
+    assert "'authorization'" in line and "'traceparent'" in line and "'x-orca-tenant'" in line
+    assert "'messages'" in line and "'model'" in line and "'stream'" in line
+    assert "555-1234" not in caplog.text and "my phone number" not in caplog.text
+
+
 @pytest.mark.parametrize(
     "utc_now,spoken",
     [

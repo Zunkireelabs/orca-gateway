@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # Skip the real backend turn and answer with a canned reply, so elapsed ~= N.
     voice_stub_skip_backend: bool = False
 
+    # P6 Fix A verify (P6-RECONCILE-JOIN-FIX-BRIEF.md §4), TEMPORARY, STAGE ONLY: logs the
+    # request HEADER NAMES and top-level BODY KEYS of every voice turn -- never values, since a
+    # turn can carry caller PII -- to find out whether ElevenLabs sends its own `conv_…`
+    # conversation id to the Custom LLM. MASTER SWITCH: off by default and never set in prod
+    # config. Remove this flag and its call site once the question (§4) is answered.
+    voice_log_request_shape_enabled: bool = False
+
     # Commit the running image was built from (set by the Docker build).
     git_sha: str = "unknown"
 

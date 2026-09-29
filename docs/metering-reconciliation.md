@@ -52,14 +52,34 @@ is per-*conversation*.
 - `tts_usage.total_characters` — the TTS meter this gateway cannot see, sourced exactly
 - `tts_usage.total_audio_output_seconds`, `asr_usage.total_audio_input_seconds` — convertible to
   `stt_minutes` (divide by 60; `asr_usage` is the STT/ASR side)
-- `cost_fiat` — "the sum of the LLM price and the non-LLM platform price," a second independent
-  cross-check against this gateway's own `llm_cost_usd`
+- `platform_price` — the non-LLM platform dollar cost (STT + TTS + per-minute), **not** `cost_fiat`
+  — see the correction below, P6 Follow-up C
 - `agent_id` — confirms the tenant↔agent mapping this gateway also stores as
   `tenant_channels.elevenlabs_agent_id`
 
 ElevenLabs' docs mark `tts_usage`/`asr_usage` **"analytics-only, not billing"** — the authoritative
-dollar figure for an invoice reconciliation is `cost_fiat`, and the character/second counts should
-be treated as accurate for volume reconciliation but not guaranteed to be the literal billing unit.
+dollar figure for an invoice reconciliation is `platform_price`, and the character/second counts
+should be treated as accurate for volume reconciliation but not guaranteed to be the literal
+billing unit.
+
+**Correction (P6 Follow-up C, session 60, 2026-09-29 — this field name was wrong twice now):** an
+earlier version of this doc (and S5's original write-up) named the dollar field `cost_fiat`. A real
+prod payload (`conv_5801m3hah36bf7rb1b5yy3wyn5vp`) proved ElevenLabs' `metadata.charging` has **no
+`cost_fiat` key at all** — `parse_charging`'s old `charging.get("cost_fiat")` always returned
+`None`, so `elevenlabs_cost_fiat` stayed null on every reconciled call even after Fix B's join
+started working. The real keys, verified on that call: `platform_price` (0.0552 USD — the dollar
+figure to store), `platform_charge` (306 ElevenLabs credits, same cost — a cross-check against the
+credit dashboard, logged not persisted), `call_charge` (306, == platform here because the LLM leg
+is free), `llm_price`/`llm_charge` (0 — confirms the Custom LLM bills our own OpenAI key, never
+ElevenLabs), `free_minutes_consumed`/`free_llm_dollars_consumed` (0 — a genuinely charged call, not
+a free dev call). `parse_charging` now reads `platform_price` into the existing
+`calls.elevenlabs_cost_fiat` column (the **column** name is unchanged, only its source field is)
+and logs a warning if `llm_price` is ever non-zero, since that would mean ElevenLabs started
+pricing the LLM leg and `cost.all_in_cost_usd` would need to stop adding it in full.
+
+**Caveat to confirm on more calls:** the ElevenLabs account has `dev_discount: true` set even
+though `free_*_consumed = 0` on the sample call — worth confirming the discount isn't silently
+zeroing `platform_price` before quoting `$/minute` as a real production cost figure.
 
 There is also `GET /v1/convai/conversations` (list, filterable by `agent_id`) for pulling a whole
 tenant's conversations in a window, but it does **not** carry the cost/usage breakdown — that
@@ -107,28 +127,27 @@ its own unique `conversation_id`, and (when the tenant's `elevenlabs_agent_id` i
 `elevenlabs_agent_id` — the join key list-and-match needs. `elevenlabs_conversation_id` is only
 populated once reconcile has actually matched a row.
 
-### The double-count trap and `cost_fiat`'s composition (P6 §3.2/§3.3, owed from S5)
+### The double-count trap and `platform_price`'s composition (P6 §3.2/§3.3, confirmed P6 Follow-up C)
 
 Because ElevenLabs calls our **Custom LLM** (Orca → Zunkiree → *our* OpenAI key), the LLM tokens
 bill to **our own** OpenAI account — `llm_cost_usd` already captures that cost in full. ElevenLabs'
-`cost_fiat` is therefore *expected* to be its own platform price (STT + TTS + its per-minute),
-with a $0 or absent LLM line, since it never actually pays for or resells our tokens. **Decided
-(P6 brief §6 Q2, resolved by Sadin): trust `cost_fiat` as-is, stored verbatim in the new
+`platform_price` (see the correction above — this field used to be misnamed `cost_fiat`) is
+therefore *expected* to be its own platform price (STT + TTS + its per-minute), with `llm_price`/
+`llm_charge` at 0, since ElevenLabs never actually pays for or resells our tokens. **Decided (P6
+brief §6 Q2, resolved by Sadin): trust `platform_price` as-is, stored in the
 `calls.elevenlabs_cost_fiat` column, and add it to `llm_cost_usd` for the all-in total
 (`cost.all_in_cost_usd`) without adjustment.**
 
-This is the recommended, expected-correct composition — **it is still owed a live confirmation**:
-the "10-call reconciliation" the P6 brief calls for (run `reconcile.py` over ~10 real pilot calls,
-then compare the computed all-in cost to `cost_fiat` and to ElevenLabs' own Monitor → usage
-dashboard) has not been run as of this PR — there is no `ELEVENLABS_API_KEY` or real pilot-call
-data available in the environment that built this slice, and a pull against real conversations is
-Sadin's own `!` action regardless (§6 Q3). **Record the result here once it's run:** if `cost_fiat`
-turns out to bundle a nonzero LLM figure under a Custom LLM, `all_in_cost_usd` is double-counting
-the LLM and this section (plus `cost.all_in_cost_usd`'s docstring) must be updated to subtract or
-exclude that portion before the panel's numbers are trusted for Dental City's margin line.
-
-*(2026-09-27, P6 build session: not yet run. — the next `!`-run reconciliation should append its
-finding here: date, tenant(s), call count, and whether `cost_fiat` included an LLM line.)*
+**Confirmed live (P6 Follow-up C, session 60, 2026-09-29):** on a real prod call
+(`conv_5801m3hah36bf7rb1b5yy3wyn5vp`, dental-city-pilot, 41s), `llm_price = 0.0` and
+`llm_charge = 0` — the Custom LLM leg genuinely bills $0 to ElevenLabs, so `all_in_cost_usd`'s
+LLM + platform sum does not double-count. `parse_charging` now logs a `WARNING` if `llm_price` is
+ever non-zero on a future call, since that would mean ElevenLabs started pricing the LLM leg and
+this section (plus `cost.all_in_cost_usd`'s docstring) would need to change to subtract or exclude
+that portion before the panel's numbers are trusted for Dental City's margin line. Still open: a
+broader reconciliation across more calls (the platform-cost figure on this one sample was
+`$0.0552`, ~`$0.08`/minute) to build confidence in `$/minute` as a stable number, and to confirm
+the account's `dev_discount: true` flag isn't silently zeroing `platform_price` on some calls.
 
 ## Telephony minutes (`telephony_minutes`)
 
