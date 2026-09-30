@@ -13,8 +13,8 @@
       "channel": "voice",
       "is_enabled": true,
       "agent_id": "front-desk",
-      "languages": ["en"],
-      "default_language": "en",
+      "languages": ["ne", "en"],
+      "default_language": "ne",
       "voice_id": null,
       "spoken_brand_name": "HR Goel Group",
       "out_of_hours_behaviour": "handoff_anyway"
