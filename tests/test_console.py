@@ -3,7 +3,7 @@ CSRF, and the "no cookie -> never 200" gate the external verify checks from outs
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -275,8 +275,17 @@ async def test_calls_filter_by_tenant_and_date(client, tenant, pg_url):
 # ---- panel 3: cost --------------------------------------------------------------------------
 
 
-async def test_cost_panel_flags_calls_before_the_metering_fix_cutoff(client, tenant, pg_url):
-    before_cutoff = Reporting.METERING_FIX_CUTOFF - timedelta(days=1)
+async def test_cost_panel_flags_calls_before_the_metering_fix_cutoff(
+    client, tenant, pg_url, monkeypatch
+):
+    # Panel 3 and the CSV both scope to "this calendar month" (reporting.py), while
+    # METERING_FIX_CUTOFF is a fixed historical instant. A call seeded relative to the real
+    # cutoff eventually falls outside the current month and the test rots with the calendar
+    # (it last passed 09-30). Anchor the cutoff to "now" instead, so both the seeded call and
+    # the month window stay relative to whenever the test actually runs.
+    cutoff = datetime.now(UTC) + timedelta(minutes=5)
+    monkeypatch.setattr(Reporting, "METERING_FIX_CUTOFF", cutoff)
+    before_cutoff = cutoff - timedelta(minutes=1)
     call_id = await _seed_call(
         pg_url, tenant, conversation_id="conv-console-old", started_at=before_cutoff
     )
@@ -289,8 +298,10 @@ async def test_cost_panel_flags_calls_before_the_metering_fix_cutoff(client, ten
     assert "includes pre-metering-fix calls" in cost_resp.text
 
 
-async def test_cost_export_csv_marks_overstated_rows(client, tenant, pg_url):
-    before_cutoff = Reporting.METERING_FIX_CUTOFF - timedelta(days=1)
+async def test_cost_export_csv_marks_overstated_rows(client, tenant, pg_url, monkeypatch):
+    cutoff = datetime.now(UTC) + timedelta(minutes=5)
+    monkeypatch.setattr(Reporting, "METERING_FIX_CUTOFF", cutoff)
+    before_cutoff = cutoff - timedelta(minutes=1)
     await _seed_call(pg_url, tenant, conversation_id="conv-console-csv", started_at=before_cutoff)
     _login(client)
     resp = client.get("/console/cost/export.csv")
