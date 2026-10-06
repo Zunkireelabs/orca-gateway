@@ -1,0 +1,32 @@
+{
+  "slug": "sbal",
+  "display_name": "Sami's Brows and Lashes",
+  "is_active": true,
+  "timezone": "Asia/Kathmandu",
+  "backend": "zunkiree",
+  "backend_config": {
+    "site_id": "sbal",
+    "base_url": "https://staging-api.zunkireelabs.com"
+  },
+  "channels": {
+    "voice": {
+      "channel": "voice",
+      "is_enabled": true,
+      "agent_id": "front-desk",
+      "languages": ["ne", "en"],
+      "default_language": "ne",
+      "voice_id": null,
+      "spoken_brand_name": "Sami's Brows and Lashes",
+      "out_of_hours_behaviour": "handoff_anyway",
+      "max_concurrent_runs": 2
+    },
+    "chat": {
+      "channel": "chat",
+      "kill_switch": false,
+      "languages": ["ne", "en"],
+      "default_language": "ne",
+      "spoken_brand_name": "Sami's Brows and Lashes",
+      "max_concurrent_runs": 2
+    }
+  }
+}
