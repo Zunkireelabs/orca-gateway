@@ -40,6 +40,28 @@ def test_every_declared_turn_event_type_has_a_real_backend_case() -> None:
             # never the catch-all's fabricated one.
             assert result.data["message"] == "backend blew up"
 
+def test_done_carries_ui_through_opaque_when_present() -> None:
+    wire_event = {
+        "type": "done",
+        "answer": "hi",
+        "sources": [],
+        "ui": {"services": [{"name": "Cleaning"}, {"name": "Whitening"}]},
+    }
+    result = _to_turn_event(wire_event)
+    assert result.data["ui"] == {"services": [{"name": "Cleaning"}, {"name": "Whitening"}]}
+
+
+def test_done_omits_ui_key_when_absent() -> None:
+    result = _to_turn_event({"type": "done", "answer": "hi", "sources": []})
+    assert "ui" not in result.data
+
+
+def test_oversized_ui_is_dropped_not_forwarded() -> None:
+    oversized = {"blob": "x" * (32 * 1024 + 1)}
+    result = _to_turn_event({"type": "done", "answer": "hi", "sources": [], "ui": oversized})
+    assert "ui" not in result.data
+
+
 SSE_BODY = (
     b'data: {"type": "tool_call", "name": "get_hours", "status": "running"}\n\n'
     b'data: {"type": "tool_call", "name": "get_hours", "status": "done"}\n\n'
