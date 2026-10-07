@@ -107,6 +107,7 @@ class TurnResult:
     sources: list
     suggestions: list
     usage: dict | None
+    ui: dict | None = None
 
 
 class WidgetChatRequest(BaseModel):
@@ -377,6 +378,7 @@ async def widget_stream(request: Request):
         answer: str | None = None
         sources: list = []
         suggestions: list = []
+        ui: dict | None = None
         usage: dict | None = None
         tools: list[dict] = []
         completed = False
@@ -395,6 +397,7 @@ async def widget_stream(request: Request):
                     answer = event.data.get("answer", "")
                     sources = event.data.get("sources", [])
                     suggestions = event.data.get("suggestions", [])
+                    ui = event.data.get("ui")
                 elif event.type == "usage":
                     usage = event.data
                 elif event.type == "tool":
@@ -411,7 +414,9 @@ async def widget_stream(request: Request):
             if not completed:
                 await abandon()
         await complete(usage=usage, answer=text_out, tools=tools)
-        return TurnResult(answer=text_out, sources=sources, suggestions=suggestions, usage=usage)
+        return TurnResult(
+            answer=text_out, sources=sources, suggestions=suggestions, usage=usage, ui=ui
+        )
 
     available = availability(cfg, ch, deps.now())
     if not available.open and ch.out_of_hours_behaviour == "say_closed":
@@ -511,14 +516,17 @@ async def widget_stream(request: Request):
         # creates one). No fabricated intermediate deltas: same "the answer is a single unit"
         # buffering voice already does, in the shape chat's wire already expects.
         yield _sse({"type": "token", "data": answer})
-        yield _sse(
-            {
-                "type": "done",
-                "answer": answer,
-                "sources": result.sources,
-                "suggestions": suggestions,
-                "session_id": conversation_id,
-            }
-        )
+        done_frame = {
+            "type": "done",
+            "answer": answer,
+            "sources": result.sources,
+            "suggestions": suggestions,
+            "session_id": conversation_id,
+        }
+        if result.ui is not None:
+            # P.UI1: opaque passthrough (vision §2.1/§8.10) -- omitted entirely when absent so
+            # every tenant that doesn't send `ui` gets a byte-identical frame to before this.
+            done_frame["ui"] = result.ui
+        yield _sse(done_frame)
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers=cors_headers)

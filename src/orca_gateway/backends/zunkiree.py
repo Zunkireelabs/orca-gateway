@@ -17,6 +17,11 @@ from orca_gateway.tenants import TenantStore, availability, require_serving
 
 logger = logging.getLogger("orca_gateway.backends.zunkiree")
 
+# P.UI1: `ui` is an opaque structured-data passthrough (vision §2.1/§8.10) -- this gateway must
+# never learn what a service or a card is. The only guardrail that belongs here is a size cap, not
+# a schema: an oversized `ui` is dropped and logged rather than forwarded or rejecting the turn.
+_UI_MAX_BYTES = 32 * 1024
+
 
 class ZunkireeAgentBackend:
     """Calls a Zunkiree-hosted agent's streaming query endpoint."""
@@ -85,14 +90,19 @@ def _to_turn_event(event: dict) -> TurnEvent:
     if event_type == "token":
         return TurnEvent(type="token", data={"text": event.get("data", "")})
     if event_type == "done":
-        return TurnEvent(
-            type="done",
-            data={
-                "answer": event.get("answer", ""),
-                "sources": event.get("sources", []),
-                "suggestions": event.get("suggestions", []),
-            },
-        )
+        data = {
+            "answer": event.get("answer", ""),
+            "sources": event.get("sources", []),
+            "suggestions": event.get("suggestions", []),
+        }
+        ui = event.get("ui")
+        if ui is not None:
+            ui_bytes = len(json.dumps(ui))
+            if ui_bytes > _UI_MAX_BYTES:
+                logger.warning("dropping oversized ui field bytes=%d", ui_bytes)
+            else:
+                data["ui"] = ui
+        return TurnEvent(type="done", data=data)
     if event_type == "tool_call":
         return TurnEvent(
             type="tool", data={"name": event.get("name", ""), "status": event.get("status", "")}

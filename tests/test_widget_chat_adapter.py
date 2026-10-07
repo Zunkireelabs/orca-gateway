@@ -122,6 +122,29 @@ async def test_seam_call_uses_session_id_as_conversation_id_and_channel_chat(wir
     assert (call["tenant"], call["agent_id"]) == ("dental-city", "front-desk")
 
 
+async def test_ui_field_passes_through_unchanged_when_present(wired):
+    wired.events = [
+        TurnEvent(
+            type="done",
+            data={
+                "answer": "final",
+                "sources": [],
+                "suggestions": [],
+                "ui": {"services": [{"name": "Cleaning"}, {"name": "Whitening"}]},
+            },
+        ),
+    ]
+    r = await _post()
+    frames = _sse(r.text)
+    assert frames[1]["ui"] == {"services": [{"name": "Cleaning"}, {"name": "Whitening"}]}
+
+
+async def test_done_frame_omits_ui_key_when_absent_byte_identical_to_today(wired):
+    r = await _post()
+    frames = _sse(r.text)
+    assert "ui" not in frames[1]
+
+
 async def test_tool_and_usage_events_are_dropped_from_the_wire(wired):
     wired.events = [
         TurnEvent(type="tool", data={"name": "get_hours", "status": "running"}),
