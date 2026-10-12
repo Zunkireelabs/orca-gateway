@@ -21,6 +21,10 @@
   <input type="hidden" name="depth" value="">
   <select name="verdict"><option value="good">good</option><option value="bad">bad</option>
     <option value="unsure">unsure</option></select>
+  <select name="category">
+    <option value="">category (required if bad)</option>
+    {% for key, text, review_only in label_categories %}<option value="{{ key }}">{{ text }}{% if review_only %} [REVIEW-ONLY]{% endif %}</option>{% endfor %}
+  </select>
   <input type="text" name="note" placeholder="note (optional)" style="width:280px;">
   <button type="submit">Label call</button>
 </form>
@@ -53,6 +57,10 @@
       <input type="hidden" name="depth" value="{{ t.depth }}">
       <select name="verdict" style="width:auto;"><option value="good">good</option>
         <option value="bad">bad</option><option value="unsure">unsure</option></select>
+      <select name="category" style="width:auto;">
+        <option value="">category (required if bad)</option>
+    {% for key, text, review_only in label_categories %}<option value="{{ key }}">{{ text }}{% if review_only %} [REVIEW-ONLY]{% endif %}</option>{% endfor %}
+      </select>
       <button type="submit">Label</button>
     </form>
   </td>
@@ -66,13 +74,14 @@
 {% if call.labels %}
 <h2 style="font-size:15px;">Labels</h2>
 <table>
-<thead><tr><th>When</th><th>Scope</th><th>Verdict</th><th>Note</th></tr></thead>
+<thead><tr><th>When</th><th>Scope</th><th>Verdict</th><th>Category</th><th>Note</th></tr></thead>
 <tbody>
 {% for l in call.labels %}
 <tr>
   <td>{{ l.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
   <td>{% if l.depth is none %}whole call{% else %}turn {{ l.depth }}{% endif %}</td>
   <td><span class="pill pill-{{ l.verdict }}">{{ l.verdict }}</span></td>
+  <td>{% if l.category %}{{ l.category }}{% if l.category in review_only_categories %} <span class="flag">review-only</span>{% endif %}{% endif %}</td>
   <td>{{ l.note or "" }}</td>
 </tr>
 {% endfor %}
