@@ -211,7 +211,7 @@ class Reporting:
             )
             call["turns"] = await cur.fetchall()
             cur = await conn.execute(
-                "select depth, verdict, note, created_at from orca_gw.call_labels "
+                "select depth, verdict, note, category, created_at from orca_gw.call_labels "
                 "where call_id = %s order by created_at desc",
                 (call_id,),
             )

@@ -7,6 +7,7 @@ import pytest
 from orca_gateway.calls_repo import PgCallsRepository
 from orca_gateway.cost import cost_usd
 from orca_gateway.tenant_repo import PgTenantRepository
+from tests.conftest import MIGRATIONS
 from tests.tenant_fixtures import dental_city
 
 
@@ -294,7 +295,8 @@ async def test_retention_purges_old_turns_and_keeps_calls_costs_and_labels(repo,
             "select id from orca_gw.calls where conversation_id = 'conv-t3'"
         ).fetchone()[0]
         conn.execute(
-            "insert into orca_gw.call_labels (call_id, depth, verdict) values (%s, 3, 'bad')",
+            "insert into orca_gw.call_labels (call_id, depth, verdict, category) "
+            "values (%s, 3, 'bad', 'loop')",
             (call_id,),
         )
         conn.execute(
@@ -495,3 +497,158 @@ async def test_record_elevenlabs_meters_stores_and_keeps_elevenlabs_conversation
             ("conv-el-2",),
         ).fetchone()
     assert row[0] == "conv_real_1"
+
+
+# ---- P7 F11 + F12: label snapshot and category ------------------------------------------------
+async def _labelled_call(repo, tenant, pg_url, conv):
+    await _one_call(repo, tenant, conv)
+    await repo.complete_turn(
+        conversation_id=conv,
+        depth=3,
+        usage={"model": "gpt-4o-mini", "prompt_tokens": 10, "completion_tokens": 5},
+        user_text="kati bajyo?",
+        answer_text="Ten rupees.",
+        tools=[{"name": "search_knowledge", "status": "ok"}],
+    )
+    with psycopg.connect(pg_url) as conn:
+        return conn.execute(
+            "select id from orca_gw.calls where conversation_id = %s", (conv,)
+        ).fetchone()[0]
+
+
+def _label_rows(pg_url, call_id):
+    with psycopg.connect(pg_url) as conn:
+        return conn.execute(
+            "select depth, verdict, category, user_text, answer_text, tools, channel "
+            "from orca_gw.call_labels where call_id = %s order by created_at",
+            (call_id,),
+        ).fetchall()
+
+
+async def test_label_snapshots_the_turn_and_the_calls_channel(repo, tenant, pg_url):
+    call_id = await _labelled_call(repo, tenant, pg_url, "conv-f11-a")
+    await repo.add_label(
+        call_id=str(call_id), depth=3, verdict="bad", note=None, category="wrong_tool"
+    )
+    with psycopg.connect(pg_url) as conn:
+        turn = conn.execute(
+            "select user_text, answer_text, tools from orca_gw.turns "
+            "where call_id = %s and depth = 3",
+            (call_id,),
+        ).fetchone()
+        channel = conn.execute(
+            "select channel from orca_gw.calls where id = %s", (call_id,)
+        ).fetchone()[0]
+    (depth, verdict, category, user_text, answer_text, tools, label_channel), = _label_rows(
+        pg_url, call_id
+    )
+    assert (user_text, answer_text, tools) == turn
+    assert (user_text, answer_text) == ("kati bajyo?", "Ten rupees.")
+    assert tools == [{"name": "search_knowledge", "status": "ok"}]
+    assert label_channel == channel
+    assert (depth, verdict, category) == (3, "bad", "wrong_tool")
+
+
+async def test_whole_call_label_has_a_null_snapshot_but_keeps_channel(repo, tenant, pg_url):
+    call_id = await _labelled_call(repo, tenant, pg_url, "conv-f11-b")
+    await repo.add_label(call_id=str(call_id), depth=None, verdict="good", note="fine")
+    (row,) = _label_rows(pg_url, call_id)
+    assert row[3:6] == (None, None, None)
+    assert row[6] is not None  # channel comes from calls, not from a turn
+
+
+async def test_label_on_a_missing_turn_still_writes_with_null_snapshot(repo, tenant, pg_url):
+    call_id = await _labelled_call(repo, tenant, pg_url, "conv-f11-c")
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute("delete from orca_gw.turns where call_id = %s", (call_id,))
+    await repo.add_label(call_id=str(call_id), depth=3, verdict="unsure", note=None)
+    (row,) = _label_rows(pg_url, call_id)
+    assert row[3:6] == (None, None, None)
+
+
+async def test_label_text_survives_the_purge_sweep(repo, tenant, pg_url):
+    call_id = await _labelled_call(repo, tenant, pg_url, "conv-f11-d")
+    await repo.add_label(call_id=str(call_id), depth=3, verdict="bad", note=None, category="tone")
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute("update orca_gw.turns set created_at = now() - interval '31 days'")
+    assert await repo.purge_turns(30) >= 1
+    with psycopg.connect(pg_url) as conn:
+        assert conn.execute("select count(*) from orca_gw.turns").fetchone()[0] == 0
+    (row,) = _label_rows(pg_url, call_id)
+    assert row[3:6] == (
+        "kati bajyo?",
+        "Ten rupees.",
+        [{"name": "search_knowledge", "status": "ok"}],
+    )
+
+
+async def test_schema_enforces_the_closed_category_list(repo, tenant, pg_url):
+    call_id = str(await _labelled_call(repo, tenant, pg_url, "conv-f11-e"))
+    with pytest.raises(psycopg.errors.CheckViolation):  # bad without a category
+        await repo.add_label(call_id=call_id, depth=3, verdict="bad", note=None)
+    with pytest.raises(psycopg.errors.CheckViolation):  # off-list category
+        await repo.add_label(call_id=call_id, depth=3, verdict="bad", note=None, category="meh")
+    with pytest.raises(psycopg.errors.CheckViolation):  # off-list even on a 'good'
+        await repo.add_label(call_id=call_id, depth=3, verdict="good", note=None, category="meh")
+    await repo.add_label(call_id=call_id, depth=3, verdict="good", note=None)  # no category: ok
+    await repo.add_label(call_id=call_id, depth=3, verdict="unsure", note=None)
+    for cat in ("wrong_tool", "no_answer", "wrong_language", "too_slow", "loop", "wrong_data",
+                "tone"):
+        await repo.add_label(call_id=call_id, depth=3, verdict="bad", note=None, category=cat)
+    assert len(_label_rows(pg_url, call_id)) == 9
+
+
+async def test_label_audit_records_category_and_snapshot(repo, tenant, pg_url):
+    call_id = await _labelled_call(repo, tenant, pg_url, "conv-f11-f")
+    await repo.add_label(
+        call_id=str(call_id), depth=3, verdict="bad", note="n", category="wrong_language"
+    )
+    with psycopg.connect(pg_url) as conn:
+        (after,) = conn.execute(
+            "select after from orca_gw.config_audit where action = 'call_label'"
+        ).fetchone()
+    assert after["category"] == "wrong_language"
+    assert after["user_text"] == "kati bajyo?"
+    assert after["answer_text"] == "Ten rupees."
+    assert after["tools"] == [{"name": "search_knowledge", "status": "ok"}]
+    assert after["channel"] == "voice"
+    assert (after["call_id"], after["depth"], after["verdict"]) == (str(call_id), 3, "bad")
+
+
+async def test_migration_0013_keeps_existing_labels(pg_url, tmp_path):
+    """Exit test 8: a database at 0012 with labels (incl. a 'bad' with no category possible
+    then) migrates to 0013 cleanly; the new columns are null and the rows survive."""
+    import shutil
+
+    from orca_gateway.migrate import migrate
+
+    upto12 = tmp_path / "m"
+    upto12.mkdir()
+    for f in sorted(MIGRATIONS.glob("*.sql")):
+        if f.name < "0013":
+            shutil.copy(f, upto12 / f.name)
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute("drop schema orca_gw cascade")
+    migrate(pg_url, upto12)
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        tid = conn.execute(
+            "insert into orca_gw.tenants (slug, display_name, backend) "
+            "values ('t', 'T', 'zunkiree') returning id"
+        ).fetchone()[0]
+        cid = conn.execute(
+            "insert into orca_gw.calls (tenant_id, channel, conversation_id, agent_id) "
+            "values (%s, 'voice', 'old', 'a') returning id",
+            (tid,),
+        ).fetchone()[0]
+        for v in ("good", "bad", "unsure"):
+            conn.execute(
+                "insert into orca_gw.call_labels (call_id, depth, verdict) values (%s, 1, %s)",
+                (cid, v),
+            )
+    migrate(pg_url, MIGRATIONS)
+    with psycopg.connect(pg_url) as conn:
+        rows = conn.execute(
+            "select verdict, user_text, answer_text, tools, channel, category "
+            "from orca_gw.call_labels order by verdict"
+        ).fetchall()
+    assert rows == [(v, None, None, None, None, None) for v in ("bad", "good", "unsure")]

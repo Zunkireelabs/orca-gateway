@@ -404,12 +404,23 @@ class PgCallsRepository:
             return float(row["llm_cost_usd"]) if row else 0.0
 
     async def add_label(
-        self, *, call_id: str, depth: int | None, verdict: str, note: str | None
+        self,
+        *,
+        call_id: str,
+        depth: int | None,
+        verdict: str,
+        note: str | None,
+        category: str | None = None,
     ) -> None:
         """Panel 2 write: the eval-set seed (vision §5). `depth = None` labels the whole call;
         an integer labels one turn. Never a foreign key to `turns` -- a label must outlive the
-        30-day purge of the turn text it was about. Audited like every other console write (before
-        is always null: a label is an addition, not an edit of a prior one)."""
+        30-day purge of the turn text it was about, so the turn's text/tools (and the call's
+        channel) are copied onto the label here, in this transaction (P7 F11, migration 0013). A
+        whole-call label, or a turn row that is missing/already purged, writes with a null snapshot:
+        labelling never fails because the text is gone. `category` is the closed failure list
+        (F12); the schema, not this method, rejects an off-list value or a 'bad' without one.
+        Audited like every other console write (before is always null: a label is an addition,
+        not an edit of a prior one)."""
         async with await self._connect() as conn, conn.transaction():
             cur = await conn.execute(
                 "select tenant_id, channel from orca_gw.calls where id = %s", (call_id,)
@@ -417,10 +428,35 @@ class PgCallsRepository:
             call = await cur.fetchone()
             if call is None:
                 raise ValueError(f"no such call: {call_id}")
+            turn = None
+            if depth is not None:
+                cur = await conn.execute(
+                    "select user_text, answer_text, tools from orca_gw.turns "
+                    "where call_id = %s and depth = %s",
+                    (call_id, depth),
+                )
+                turn = await cur.fetchone()
+            snapshot = {
+                "user_text": turn["user_text"] if turn else None,
+                "answer_text": turn["answer_text"] if turn else None,
+                "tools": turn["tools"] if turn else None,
+                "channel": call["channel"],
+            }
             await conn.execute(
-                "insert into orca_gw.call_labels (call_id, depth, verdict, note) "
-                "values (%s, %s, %s, %s)",
-                (call_id, depth, verdict, note),
+                "insert into orca_gw.call_labels "
+                "(call_id, depth, verdict, note, category, user_text, answer_text, tools, channel) "
+                "values (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    call_id,
+                    depth,
+                    verdict,
+                    note,
+                    category,
+                    snapshot["user_text"],
+                    snapshot["answer_text"],
+                    None if snapshot["tools"] is None else Jsonb(snapshot["tools"]),
+                    snapshot["channel"],
+                ),
             )
             await conn.execute(
                 "insert into orca_gw.config_audit "
@@ -429,7 +465,16 @@ class PgCallsRepository:
                 (
                     call["tenant_id"],
                     call["channel"],
-                    Jsonb({"call_id": call_id, "depth": depth, "verdict": verdict, "note": note}),
+                    Jsonb(
+                        {
+                            "call_id": call_id,
+                            "depth": depth,
+                            "verdict": verdict,
+                            "note": note,
+                            "category": category,
+                            **snapshot,
+                        }
+                    ),
                 ),
             )
 

@@ -578,3 +578,64 @@ async def test_config_save_rejects_an_unusable_allowed_phone_number(client, tena
     assert resp.status_code == 400
     ch = (await PgTenantRepository(pg_url).load(tenant)).channels["voice"]
     assert ch.phone_guard is False and ch.allowed_phone_numbers == []
+
+
+async def test_label_form_offers_the_closed_list_and_marks_review_only(client, tenant, pg_url):
+    call_id = await _seed_call(pg_url, tenant, conversation_id="conv-console-f12")
+    _login(client)
+    page = client.get(f"/console/calls/{call_id}").text
+    for key in ("wrong_tool", "no_answer", "wrong_language", "too_slow", "loop", "wrong_data",
+                "tone"):
+        assert f'<option value="{key}">' in page
+    assert "wrong_data: right shape, wrong facts [REVIEW-ONLY]" in page
+    assert "tone: rude, robotic, read markdown aloud [REVIEW-ONLY]" in page
+    assert "wrong_tool: called the wrong tool, or none [REVIEW-ONLY]" not in page
+
+
+async def test_saved_label_shows_its_category_and_the_snapshot_is_pinned(client, tenant, pg_url):
+    call_id = await _seed_call(pg_url, tenant, conversation_id="conv-console-f12b")
+    _login(client)
+    csrf = _extract_csrf(client.get(f"/console/calls/{call_id}").text)
+    post = client.post(
+        f"/console/calls/{call_id}/label",
+        data={"csrf_token": csrf, "depth": "2", "verdict": "bad", "category": "tone", "note": ""},
+        follow_redirects=False,
+    )
+    assert post.status_code == 303
+    page = client.get(f"/console/calls/{call_id}").text
+    assert "<td>tone <span" in page and "review-only" in page
+    with psycopg.connect(pg_url) as conn:
+        row = conn.execute(
+            "select user_text, answer_text, channel from orca_gw.call_labels where call_id = %s",
+            (call_id,),
+        ).fetchone()
+    assert row == ("hours today?", "9 to 5.", "voice")
+
+
+async def test_bad_without_category_is_a_400_not_a_500(client, tenant, pg_url):
+    call_id = await _seed_call(pg_url, tenant, conversation_id="conv-console-f12c")
+    _login(client)
+    csrf = _extract_csrf(client.get(f"/console/calls/{call_id}").text)
+    for category in ("", "meh"):
+        post = client.post(
+            f"/console/calls/{call_id}/label",
+            data={"csrf_token": csrf, "depth": "2", "verdict": "bad", "category": category},
+            follow_redirects=False,
+        )
+        assert post.status_code == 400
+    with psycopg.connect(pg_url) as conn:
+        assert conn.execute("select count(*) from orca_gw.call_labels").fetchone()[0] == 0
+
+
+async def test_labelling_a_purged_turn_is_still_303(client, tenant, pg_url):
+    call_id = await _seed_call(pg_url, tenant, conversation_id="conv-console-f11x")
+    with psycopg.connect(pg_url, autocommit=True) as conn:
+        conn.execute("delete from orca_gw.turns")
+    _login(client)
+    csrf = _extract_csrf(client.get(f"/console/calls/{call_id}").text)
+    post = client.post(
+        f"/console/calls/{call_id}/label",
+        data={"csrf_token": csrf, "depth": "2", "verdict": "good"},
+        follow_redirects=False,
+    )
+    assert post.status_code == 303

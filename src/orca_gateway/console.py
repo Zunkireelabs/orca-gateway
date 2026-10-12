@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import psycopg
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -39,6 +40,22 @@ router = APIRouter(prefix="/console")
 log = logging.getLogger("orca_gateway.console")
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+# The closed failure list for labels (P7 F12). The schema (0013) is the authority; this is only
+# what the select renders. `review_only` = cannot be asserted from a turn_summary line, so it must
+# never become a runner case -- the labeller has to be able to see that.
+templates.env.globals["label_categories"] = [
+    ("wrong_tool", "wrong_tool: called the wrong tool, or none", False),
+    ("no_answer", "no_answer: said it didn't know what it knows", False),
+    ("wrong_language", "wrong_language: replied in the wrong language", False),
+    ("too_slow", "too_slow: caller waited, or the call dropped", False),
+    ("loop", "loop: asked the same thing again", False),
+    ("wrong_data", "wrong_data: right shape, wrong facts", True),
+    ("tone", "tone: rude, robotic, read markdown aloud", True),
+]
+templates.env.globals["review_only_categories"] = {
+    key for key, _, review_only in templates.env.globals["label_categories"] if review_only
+}
 
 _WEEKDAYS = list(range(7))
 
@@ -230,6 +247,7 @@ async def label_call(
     depth: str = Form(""),
     verdict: str = Form(...),
     note: str = Form(""),
+    category: str = Form(""),
     session: str = Depends(require_session),
 ):
     require_csrf(request, csrf_token, session)
@@ -238,10 +256,17 @@ async def label_call(
     depth_val = int(depth) if depth.strip() != "" else None
     try:
         await deps.get_calls_repo().add_label(
-            call_id=call_id, depth=depth_val, verdict=verdict, note=note or None
+            call_id=call_id,
+            depth=depth_val,
+            verdict=verdict,
+            note=note or None,
+            category=category or None,
         )
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from None
+    except psycopg.errors.CheckViolation:
+        # The closed list and "bad needs a category" live in the schema (0013), not here.
+        raise HTTPException(400, "a 'bad' label needs a category from the list") from None
     return RedirectResponse(f"/console/calls/{call_id}?labeled=1", status_code=303)
 
 
